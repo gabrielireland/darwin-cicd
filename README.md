@@ -4,6 +4,11 @@ Reusable CI/CD scripts for Google CloudBuild VM-based pipelines.
 
 Handles Docker image builds, VM creation with zone fallback, startup script assembly, and Cloud Logging integration. Designed to be consumed as a **git submodule**.
 
+## Guides
+
+- **[Setup Guide](docs/SETUP.md)** — Add this module to your project
+- **[Pipeline Guide](docs/PIPELINE_GUIDE.md)** — Create a new CloudBuild VM pipeline from scratch (full YAML + VM script template)
+
 ## Quick Start
 
 ### 1. Add the submodule
