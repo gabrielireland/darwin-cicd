@@ -1,4 +1,20 @@
 # Project Rules
+<!--
+  TEMPLATE from darwin-cicd (github.com/gabrielireland/darwin-cicd)
+
+  HOW TO USE:
+    1. Copy this file to your project root: cp cicd/templates/CLAUDE.md ./CLAUDE.md
+    2. Sections 1-3 are UNIVERSAL — keep as-is, they enforce Darwin CI/CD standards
+    3. Section 4 is PROJECT-SPECIFIC — fill in your pipelines, file structure, and domain rules
+    4. Claude Code reads CLAUDE.md from the project root automatically
+
+  UPDATING:
+    When darwin-cicd updates this template, diff against your copy and merge new rules.
+-->
+
+<!-- ============================================================ -->
+<!-- UNIVERSAL RULES — Do not modify (from darwin-cicd template)   -->
+<!-- ============================================================ -->
 
 ## 1. CORE PRINCIPLES
 
@@ -8,7 +24,7 @@
 |----------------|---------|
 | Paths | Config files, CLI args, env vars |
 | Feature names/indices | Read from `*_metadata.json` sidecars |
-| Class names/mappings | Read from `_LABELS_METADATA_PATH` (labels metadata JSON) |
+| Class names/mappings | Read from metadata JSON files |
 | Magic numbers | Named constants or config |
 | Year values | Pass as parameters |
 | Bucket/region names | `cloudbuild-builds/config/defaults.yaml` + CloudBuild substitution variables |
@@ -29,13 +45,6 @@
 **NEVER** give `gcloud builds submit --substitutions=...` commands.
 **ALWAYS** edit the YAML file directly with desired parameters.
 
-```yaml
-# WRONG - Telling user to run with --substitutions
-# CORRECT - Edit the YAML:
-_FEATURE_YEARS: '2023'
-_AREA: 'ordesa'
-```
-
 ### 1.4 Keep CLAUDE.md Updated
 
 Suggest additions when:
@@ -45,24 +54,13 @@ Suggest additions when:
 
 **Never add to CLAUDE.md yourself** - suggest to user first.
 
-### 1.5 Metadata Chain of Custody (CRITICAL)
+### 1.5 Metadata Rules
 
-**RULE: Metadata does NOT get disconnected at any moment.**
-
-All metadata files MUST be JSON (not YAML):
+**All metadata files MUST be JSON** (not YAML):
 - `*_metadata.json` — per-file metadata
-- `manifest.json` — per-run provenance
-- `_run_contract.json` — status/verification
+- `_run_contract.json` — run status, config, provenance, verification
 
-Class definitions flow through the pipeline via metadata JSON files:
-```
-Label Engineering → labels_*_metadata.json → Training → model_metadata.json → Prediction/Analysis
-```
-
-**Requirements**:
-- `_LABELS_METADATA_PATH` MUST be set in training and any downstream pipeline that uses class info
-- Downstream pipelines MUST point to the SAME labels metadata file used in training
-- Scripts MUST read class definitions from metadata, NOT from hardcoded configs
+**Metadata chain of custody**: metadata does NOT get disconnected at any moment. Downstream pipelines MUST read class definitions, feature names, and config from upstream metadata files — NOT from hardcoded values.
 
 ---
 
@@ -76,12 +74,6 @@ Label Engineering → labels_*_metadata.json → Training → model_metadata.jso
 #!/bin/bash
 set -euo pipefail
 ```
-
-| Flag | Meaning |
-|------|---------|
-| `-e` | Exit on any command failure |
-| `-u` | Error on undefined variables |
-| `-o pipefail` | Fail if any command in a pipeline fails |
 
 ### 2.2 Variable Escaping (CRITICAL)
 
@@ -132,9 +124,6 @@ python3 -c "first = ${PYTHON_BOOL}"
 **NEVER use `tr '|' '\n'` in CloudBuild YAML** — `\n` is not interpreted as newline.
 
 ```yaml
-# WRONG
-VALUE=$$(echo "${_MY_VAR}" | tr '|' '\n' | grep "^key=" | cut -d'=' -f2)
-
 # CORRECT - Use space delimiter + loop
 VALUE=""
 for MAPPING in $$(echo "${_MY_VAR}" | tr '|' ' '); do
@@ -180,9 +169,7 @@ When changing a shared value, update `defaults.yaml` FIRST, then update all YAML
 
 ### 2.11 `cicd/` Submodule (CRITICAL)
 
-Reusable CI/CD scripts live in **`darwin-cicd`** (github.com/gabrielireland/darwin-cicd), consumed as a git submodule at `cicd/`.
-
-**Key rules:**
+Reusable CI/CD scripts live in **`darwin-cicd`**, consumed as a git submodule at `cicd/`.
 
 | Rule | Details |
 |------|---------|
@@ -191,44 +178,12 @@ Reusable CI/CD scripts live in **`darwin-cicd`** (github.com/gabrielireland/darw
 | **`source` vs `bash`** | `export_vm_defaults.sh` MUST use `source`. All other scripts use `bash`. |
 | **`VM_SCRIPTS_DIR`** | Tells `prepare_vm_startup.sh` where project VM scripts are (default: `cloudbuild-builds/vm`) |
 
-**CloudBuild YAML pattern:**
-```yaml
-# REQUIRED first step
-- name: 'gcr.io/cloud-builders/git'
-  id: 'init-submodules'
-  args: ['submodule', 'update', '--init', '--recursive']
-
-# Every step calling cicd/ scripts
-- name: '...'
-  entrypoint: 'bash'
-  args:
-    - '-c'
-    - |
-      set -euo pipefail
-      export DEFAULTS_FILE="cloudbuild-builds/config/defaults.yaml"
-      bash cicd/builders/build_base_image_step.sh
-```
-
-**YAML substitutions layout:**
-```yaml
-substitutions:
-  # ---- Pipeline-specific ----
-  _MY_PARAM: 'value'
-
-  # ---- Shared (from cloudbuild-builds/config/defaults.yaml) ----
-  _REGION: 'europe-west1'
-```
-
 **VM creation pattern (4 steps in order):**
 ```bash
-# 1. Assemble startup script (common sed done automatically)
-bash cicd/builders/prepare_vm_startup.sh
-# 2. Pipeline-specific sed
-sed -i "s|__MY_PARAM__|value|g" /tmp/startup-script.sh
-# 3. Export VM defaults (MUST use source)
-source cicd/builders/export_vm_defaults.sh
-# 4. Create VM
-bash cicd/builders/create_vm.sh
+bash cicd/builders/prepare_vm_startup.sh       # 1. Assemble + common sed
+sed -i "s|__MY_PARAM__|value|g" /tmp/startup-script.sh  # 2. Pipeline-specific sed
+source cicd/builders/export_vm_defaults.sh     # 3. Export VM defaults (MUST source)
+bash cicd/builders/create_vm.sh                # 4. Create VM
 ```
 
 See `cicd/docs/PIPELINE_GUIDE.md` for the complete template.
@@ -256,41 +211,50 @@ See `cicd/docs/PIPELINE_GUIDE.md` for the complete template.
 - Application code at `/app`
 - No cache: `pip install --no-cache-dir`
 
+<!-- ============================================================ -->
+<!-- PROJECT-SPECIFIC — Customize the sections below for your repo -->
+<!-- ============================================================ -->
+
 ---
 
-## 4. FILE STRUCTURE
+## 4. PROJECT: Pipelines
+<!-- List your active pipelines here. Example:
+| Stage | File | Purpose |
+|-------|------|---------|
+| 1 | `1-cloudbuild-feature-engineering.yaml` | Feature extraction |
+| 2 | `2-cloudbuild-training.yaml` | Model training |
+| 3 | `3-cloudbuild-prediction.yaml` | Inference |
+-->
 
+TODO: Add your pipeline table here.
+
+---
+
+## 5. PROJECT: File Structure
+<!-- Document your repo's directory layout. Example:
 ```
-├── {N}-cloudbuild-*.yaml            # Pipeline definitions (numbered by stage)
-├── cicd/                            # Git submodule → darwin-cicd
-│   ├── config/load_defaults.sh
-│   ├── builders/                    # Shared build + VM scripts
-│   ├── utils/                       # VM startup utilities
-│   └── docs/                        # Setup + pipeline guides
+├── 1-cloudbuild-*.yaml
+├── cicd/                        # Submodule (do not edit)
 ├── cloudbuild-builds/
-│   ├── config/
-│   │   └── defaults.yaml            # Single source of truth for shared values
-│   ├── builders/                    # Project-specific orchestrators
-│   ├── docker/
-│   │   └── {project}/
-│   │       ├── Dockerfile.base      # Dependencies layer
-│   │       ├── Dockerfile           # Code layer
-│   │       └── requirements.txt
-│   └── vm/                          # VM startup scripts (one per pipeline)
-├── src/                             # Application source code
-├── model/                           # ML model code
-└── configs/                         # Configuration files
+│   ├── config/defaults.yaml
+│   ├── docker/{project}/
+│   └── vm/
+├── src/
+└── configs/
 ```
+-->
+
+TODO: Add your file structure here.
 
 ---
 
-## 5. PIPELINE ORCHESTRATION
+## 6. PROJECT: Domain Rules
+<!-- Add project-specific rules here. Examples:
+- Metadata chain of custody specific to your pipeline stages
+- Input file naming conventions
+- Class definition workflow
+- Feature naming conventions
+- Any gotchas specific to your domain
+-->
 
-| Rule | Details |
-|------|---------|
-| **VM for Large Data** | Files >20GB MUST use VM |
-| **Pipeline Numbering** | 1-*.yaml = data prep, 2-*.yaml = training, 3-*.yaml = prediction, 4-*.yaml = analysis |
-| **Model ID Propagation** | Use exact MODEL_ID from training in all downstream pipelines |
-| **Labels Metadata Path** | `_LABELS_METADATA_PATH` MUST be consistent across training and downstream |
-| **Year Format** | Multiple: `'2021:2023'`, Single: `'2025'` |
-| **VM Logging** | `create_vm.sh` + `print_logging_link.sh` emit Cloud Logging URLs automatically |
+TODO: Add your domain-specific rules here.
