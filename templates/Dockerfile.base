@@ -1,0 +1,82 @@
+# ========================================
+# Base Dockerfile — Dependencies Only
+# ========================================
+#
+# Two-layer build pattern:
+#   Base (this file):  OS packages + Python packages. Rebuilt rarely.
+#   Code (Dockerfile): Application source. Rebuilt every commit.
+#
+# Set _UPDATE_BASE='true' in your CloudBuild YAML to rebuild this layer.
+#
+# Build:
+#   docker build -t my-base:latest -f cloudbuild-builds/docker/my_project/Dockerfile.base .
+#
+
+FROM python:3.10-slim
+
+# ========================================
+# Environment
+# ========================================
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    VENV_PATH=/opt/venv \
+    PROJECT_ROOT=/app
+
+# ========================================
+# System Dependencies
+# ========================================
+# Add/remove packages as needed for your project.
+# Common additions: libgdal-dev gdal-bin (geospatial), libgomp1 (LightGBM)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    build-essential \
+    ca-certificates \
+    curl \
+    gnupg \
+    git \
+ && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
+    > /etc/apt/sources.list.d/google-cloud-sdk.list \
+ && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends google-cloud-sdk \
+ && rm -rf /var/lib/apt/lists/*
+
+# ========================================
+# Python Virtual Environment
+# ========================================
+RUN python3 -m venv $VENV_PATH \
+ && $VENV_PATH/bin/pip install --upgrade pip setuptools wheel
+
+ENV CLOUD_SDK_ROOT=/usr/lib/google-cloud-sdk
+ENV PATH="/opt/venv/bin:${CLOUD_SDK_ROOT}/bin:$PATH"
+
+# ========================================
+# Python Dependencies
+# ========================================
+# Update the COPY path to match your project's requirements.txt location
+COPY cloudbuild-builds/docker/my_project/requirements.txt /tmp/requirements.txt
+RUN $VENV_PATH/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ========================================
+# Working Directory
+# ========================================
+WORKDIR /app
+ENV PYTHONPATH="/app"
+RUN mkdir -p /app/outputs
+
+# ========================================
+# Non-root User
+# ========================================
+ARG USERNAME=appuser
+ARG UID=1000
+ARG GID=1000
+
+RUN groupadd -g ${GID} ${USERNAME} \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash ${USERNAME} \
+ && chown -R ${USERNAME}:${USERNAME} /app
+
+USER ${USERNAME}
+
+CMD ["/bin/bash"]

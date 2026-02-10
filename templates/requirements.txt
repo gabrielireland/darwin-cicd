@@ -1,0 +1,23 @@
+# Python dependencies — customize for your project
+# Common packages for Darwin geospatial ML pipelines:
+
+# Core
+numpy>=1.24.0,<2.0
+pandas
+pyyaml
+tqdm
+
+# ML
+scikit-learn
+lightgbm
+
+# Geospatial
+rasterio
+
+# GCS
+google-cloud-storage
+gcsfs
+
+# Visualization
+matplotlib
+seaborn

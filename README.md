@@ -9,6 +9,15 @@ Handles Docker image builds, VM creation with zone fallback, startup script asse
 - **[Setup Guide](docs/SETUP.md)** — Add this module to your project
 - **[Pipeline Guide](docs/PIPELINE_GUIDE.md)** — Create a new CloudBuild VM pipeline from scratch
 
+## Templates
+
+Copy these to your project as starting points:
+
+- **[templates/CLAUDE.md](templates/CLAUDE.md)** — AI assistant rules (copy to project root as `CLAUDE.md`)
+- **[templates/Dockerfile.base](templates/Dockerfile.base)** — Base image with OS + Python deps
+- **[templates/Dockerfile](templates/Dockerfile)** — Code layer (rebuilt every commit)
+- **[templates/requirements.txt](templates/requirements.txt)** — Common Python packages
+
 ## What's included
 
 ```
@@ -27,9 +36,14 @@ cicd/
 ├── utils/
 │   ├── preflight_check.sh         # GCS validation (concatenated into VM scripts)
 │   └── startup_common.sh          # Docker auth + pull (concatenated into VM scripts)
-└── docs/
-    ├── SETUP.md
-    └── PIPELINE_GUIDE.md
+├── docs/
+│   ├── SETUP.md
+│   └── PIPELINE_GUIDE.md
+└── templates/
+    ├── CLAUDE.md              # AI assistant rules template
+    ├── Dockerfile.base        # Base image template
+    ├── Dockerfile             # Code layer template
+    └── requirements.txt       # Common Python packages
 ```
 
 ## Quick start

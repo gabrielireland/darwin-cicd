@@ -37,22 +37,39 @@ boot_disk_size: '200GB'
 update_base: 'false'
 ```
 
-## 3. Create your project directories
+## 3. Copy templates
+
+```bash
+# AI assistant rules (ensures Claude Code follows Darwin CI/CD patterns)
+cp cicd/templates/CLAUDE.md ./CLAUDE.md
+
+# Docker files
+mkdir -p cloudbuild-builds/docker/my_project
+cp cicd/templates/Dockerfile.base cloudbuild-builds/docker/my_project/
+cp cicd/templates/Dockerfile cloudbuild-builds/docker/my_project/
+cp cicd/templates/requirements.txt cloudbuild-builds/docker/my_project/
+```
+
+Edit each file to match your project (update paths, add dependencies, customize CLAUDE.md).
+
+## 4. Create your project directories
 
 ```
 my-project/
+├── CLAUDE.md                          # AI rules (from template)
 ├── cicd/                              # Submodule (do not edit directly)
 ├── cloudbuild-builds/
 │   ├── config/defaults.yaml           # Your project defaults
-│   ├── docker/
-│   │   ├── Dockerfile.base            # Base image (dependencies)
-│   │   └── Dockerfile                 # Code layer (your source)
+│   ├── docker/my_project/
+│   │   ├── Dockerfile.base            # Base image (from template)
+│   │   ├── Dockerfile                 # Code layer (from template)
+│   │   └── requirements.txt           # Python deps (from template)
 │   └── vm/                            # VM startup scripts (one per pipeline)
 │       └── my_pipeline.sh
 └── my-pipeline.yaml                   # CloudBuild YAML
 ```
 
-## 4. Verify setup
+## 5. Verify setup
 
 ```bash
 # Check submodule is initialized
@@ -66,7 +83,7 @@ echo $CB_REGION   # Should print: europe-west1
 echo $CB_BUCKET   # Should print: my-gcs-bucket
 ```
 
-## 5. For new team members
+## 6. For new team members
 
 After cloning the project:
 
@@ -80,7 +97,7 @@ Or clone with submodules in one step:
 git clone --recurse-submodules https://github.com/your-org/your-project.git
 ```
 
-## 6. Updating the submodule
+## 7. Updating the submodule
 
 When `darwin-cicd` has new updates:
 
