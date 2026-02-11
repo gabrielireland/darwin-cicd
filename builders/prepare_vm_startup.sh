@@ -63,7 +63,7 @@ sed -i "s|__OUTPUT_BUCKET__|${BUCKET}|g" /tmp/startup-script.sh
 
 # VM metadata (identical across all pipelines)
 sed -i "s|__VM_NAME__|${VM_NAME}|g" /tmp/startup-script.sh
-# __VM_ZONE__ is left as-is here; create_vm.sh replaces it with the actual zone
+# __VM_ZONE__ is left as-is here; create_multi_vms.sh replaces it with the actual zone
 sed -i "s|__VM_ZONE__|__VM_ZONE__|g" /tmp/startup-script.sh
 sed -i "s|__BUILD_ID__|${BUILD_ID}|g" /tmp/startup-script.sh
 sed -i "s|__GIT_COMMIT__|${SHORT_SHA}|g" /tmp/startup-script.sh

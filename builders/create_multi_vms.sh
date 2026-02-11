@@ -1,11 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 # ========================================
-# Universal Multi-VM Orchestrator
+# Universal VM Orchestrator
 # ========================================
 # Creates 1..N VMs from workspace config files.
-# Single entry point for ALL pipelines — replaces direct calls to
-# prepare_vm_startup.sh + export_vm_defaults.sh + create_vm.sh.
+# Single entry point for ALL pipelines.
 #
 # Reads:
 #   /workspace/vm_count.txt           - Number of VMs to create
@@ -34,6 +33,9 @@ set -euo pipefail
 
 CICD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Load defaults
+source "${CICD_ROOT}/config/load_defaults.sh"
+
 VM_COUNT_FILE="/workspace/vm_count.txt"
 if [[ ! -f "$VM_COUNT_FILE" ]]; then
   echo "ERROR: $VM_COUNT_FILE not found" >&2
@@ -51,6 +53,29 @@ echo "=========================================="
 echo "Universal VM Orchestrator: $VM_COUNT VM(s)"
 echo "=========================================="
 echo ""
+
+# Resolve shared VM defaults
+TRAINING_ZONES="${TRAINING_ZONES:-${CB_VM_ZONES}}"
+_MACHINE_TYPE="${_MACHINE_TYPE:?Missing _MACHINE_TYPE}"
+_GPU_TYPE="${_GPU_TYPE:-}"
+_GPU_COUNT="${_GPU_COUNT:-0}"
+_BOOT_DISK_SIZE="${_BOOT_DISK_SIZE:-${CB_BOOT_DISK_SIZE}}"
+_VM_SERVICE_ACCOUNT="${_VM_SERVICE_ACCOUNT:-${CB_VM_SERVICE_ACCOUNT}}"
+USE_SPOT=$(echo "${_USE_SPOT:-false}" | tr '[:upper:]' '[:lower:]')
+MAX_RUN_DURATION="${MAX_RUN_DURATION:-5h}"
+
+# Parse zone list
+IFS=',' read -ra ZONES <<< "$TRAINING_ZONES"
+if [[ ${#ZONES[@]} -eq 0 ]]; then
+  echo "ERROR: No zones configured" >&2
+  exit 1
+fi
+
+# VM image settings
+GPU_IMAGE_FAMILY="${GPU_IMAGE_FAMILY:-pytorch-2-7-cu128-ubuntu-2204-nvidia-570}"
+GPU_IMAGE_PROJECT="${GPU_IMAGE_PROJECT:-deeplearning-platform-release}"
+BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-standard}"
+INSTANCE_METADATA="${INSTANCE_METADATA:-google-logging-enabled=true,google-monitoring-enabled=true,install-nvidia-driver=True,startup-script-running=TRUE}"
 
 # Save original PIPELINE_TITLE for per-VM {AREA} resolution
 ORIG_PIPELINE_TITLE="${PIPELINE_TITLE}"
@@ -80,9 +105,9 @@ for IDX in $(seq 1 "$VM_COUNT"); do
 
   # Read instance labels
   if [[ -f "$LABELS_FILE" ]]; then
-    export INSTANCE_LABELS=$(cat "$LABELS_FILE")
+    INSTANCE_LABELS=$(cat "$LABELS_FILE")
   else
-    export INSTANCE_LABELS="type=vm,build=${SHORT_SHA:-unknown}"
+    INSTANCE_LABELS="type=vm,build=${SHORT_SHA:-unknown}"
   fi
 
   # Build VM name from CODE_IMAGE_NAME + suffix + timestamp
@@ -106,7 +131,6 @@ for IDX in $(seq 1 "$VM_COUNT"); do
     [[ -z "$LINE" || "$LINE" =~ ^# || "$LINE" != *"="* ]] && continue
     KEY="${LINE%%=*}"
     VALUE="${LINE#*=}"
-    # Use '#' delimiter for values containing '|', otherwise '|'
     if [[ "$VALUE" == *"|"* ]]; then
       sed -i "s#__${KEY}__#${VALUE}#g" "$STARTUP_FILE"
     else
@@ -114,17 +138,115 @@ for IDX in $(seq 1 "$VM_COUNT"); do
     fi
   done < "$CONFIG_FILE"
 
-  # 4. Create VM (export_vm_defaults.sh must be sourced, not bashed)
-  export STARTUP_SCRIPT="$STARTUP_FILE"
-  source "${CICD_ROOT}/builders/export_vm_defaults.sh"
-  bash "${CICD_ROOT}/builders/create_vm.sh"
+  # 4. Cleanup old VMs with same prefix
+  VM_NAME_PREFIX=$(echo "$VM_NAME" | sed -E 's/-[0-9]{8}-[0-9]{6}$//')
+  for RAW_ZONE in "${ZONES[@]}"; do
+    ZONE="$(echo "$RAW_ZONE" | xargs)"
+    [[ -z "$ZONE" ]] && continue
+    MATCHING_VMS=$(gcloud compute instances list \
+      --zones="$ZONE" \
+      --filter="name:${VM_NAME_PREFIX}*" \
+      --format="value(name,status)" 2>/dev/null || echo "")
+    if [[ -n "$MATCHING_VMS" ]]; then
+      while IFS= read -r VM_LINE; do
+        OLD_VM_NAME=$(echo "$VM_LINE" | awk '{print $1}')
+        OLD_VM_STATUS=$(echo "$VM_LINE" | awk '{print $2}')
+        [[ -z "$OLD_VM_NAME" ]] && continue
+        case "$OLD_VM_STATUS" in
+          RUNNING)
+            echo "  Skipping running VM: ${OLD_VM_NAME} in ${ZONE}"
+            ;;
+          SUSPENDED|TERMINATED|STOPPING|SUSPENDING|STAGING)
+            echo "  Cleaning up stopped VM: ${OLD_VM_NAME} in ${ZONE}"
+            gcloud compute instances delete "$OLD_VM_NAME" --zone="$ZONE" --quiet || true
+            ;;
+        esac
+      done <<< "$MATCHING_VMS"
+    fi
+  done
+
+  # 5. Create VM with zone fallback
+  VM_CREATED=false
+  ACTUAL_ZONE=""
+  for RAW_ZONE in "${ZONES[@]}"; do
+    ZONE="$(echo "$RAW_ZONE" | xargs)"
+    [[ -z "$ZONE" ]] && continue
+    echo "Trying zone: $ZONE..."
+
+    # Replace zone placeholder in startup script
+    sed "s|__VM_ZONE__|$ZONE|g" "$STARTUP_FILE" > "/tmp/startup-script-${ZONE}.sh"
+    ZONE_STARTUP="/tmp/startup-script-${ZONE}.sh"
+
+    CREATE_CMD=(gcloud compute instances create "$VM_NAME"
+      --zone="$ZONE"
+      --machine-type="$_MACHINE_TYPE"
+      --boot-disk-size="$_BOOT_DISK_SIZE"
+      --boot-disk-type="$BOOT_DISK_TYPE"
+      --max-run-duration="$MAX_RUN_DURATION"
+      --instance-termination-action=DELETE
+      --service-account="$_VM_SERVICE_ACCOUNT"
+      --scopes=cloud-platform
+      --metadata-from-file="startup-script=$ZONE_STARTUP"
+      --metadata="$INSTANCE_METADATA"
+      --labels="$INSTANCE_LABELS"
+    )
+
+    # Add GPU-specific flags only if GPU is requested
+    if [[ -n "$_GPU_TYPE" && "$_GPU_COUNT" -gt 0 ]]; then
+      CREATE_CMD+=(
+        --accelerator="type=$_GPU_TYPE,count=$_GPU_COUNT"
+        --image-family="$GPU_IMAGE_FAMILY"
+        --image-project="$GPU_IMAGE_PROJECT"
+        --maintenance-policy=TERMINATE
+      )
+    else
+      CREATE_CMD+=(
+        --image-family="${CPU_IMAGE_FAMILY:-ubuntu-2204-lts}"
+        --image-project="${CPU_IMAGE_PROJECT:-ubuntu-os-cloud}"
+      )
+    fi
+
+    if [[ "$USE_SPOT" == "true" ]]; then
+      CREATE_CMD+=("--provisioning-model=SPOT" "--instance-termination-action=DELETE")
+    fi
+
+    if "${CREATE_CMD[@]}" 2>&1; then
+      VM_CREATED=true
+      ACTUAL_ZONE="$ZONE"
+      break
+    else
+      echo "Zone $ZONE unavailable, trying next..."
+    fi
+  done
+
+  if [[ "$VM_CREATED" != "true" ]]; then
+    echo "ERROR: Could not create VM $VM_NAME in any configured zone" >&2
+    exit 1
+  fi
+
+  echo "$ACTUAL_ZONE" > /workspace/vm_zone.txt
+
+  # Get instance ID for Cloud Logging
+  INSTANCE_ID=$(gcloud compute instances describe "$VM_NAME" --zone="$ACTUAL_ZONE" --format='get(id)' 2>/dev/null || echo "")
+  echo "$INSTANCE_ID" > /workspace/vm_instance_id.txt
+
+  echo "VM created in zone: $ACTUAL_ZONE"
+
+  # Cloud Logging link
+  PROJECT_ID_FOR_URL="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
+  if [[ -n "$INSTANCE_ID" ]]; then
+    LOGS_QUERY="resource.type%3D%22gce_instance%22%20resource.labels.zone%3D%22${ACTUAL_ZONE}%22%20resource.labels.instance_id%3D%22${INSTANCE_ID}%22%20severity%3E%3DDEFAULT"
+  else
+    LOGS_QUERY="resource.type%3D%22gce_instance%22%20%22${VM_NAME}%22%20severity%3E%3DDEFAULT"
+  fi
+  echo "Logs: https://console.cloud.google.com/logs/query;query=${LOGS_QUERY};project=${PROJECT_ID_FOR_URL}"
 
   # Collect VM names
   ALL_VM_NAMES="${ALL_VM_NAMES:+${ALL_VM_NAMES} }${VM_NAME}"
   echo ""
 done
 
-# Save all VM names (overwrites per-VM writes from create_vm.sh)
+# Save all VM names
 echo "$ALL_VM_NAMES" > /workspace/vm_names.txt
 
 echo "=========================================="
