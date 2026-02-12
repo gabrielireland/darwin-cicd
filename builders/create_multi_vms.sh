@@ -224,11 +224,12 @@ for IDX in $(seq 1 "$VM_COUNT"); do
     exit 1
   fi
 
-  echo "$ACTUAL_ZONE" > /workspace/vm_zone.txt
+  echo "$ACTUAL_ZONE" > "/workspace/vm_zone_${IDX}.txt"
 
   # Get instance ID for Cloud Logging
   INSTANCE_ID=$(gcloud compute instances describe "$VM_NAME" --zone="$ACTUAL_ZONE" --format='get(id)' 2>/dev/null || echo "")
-  echo "$INSTANCE_ID" > /workspace/vm_instance_id.txt
+  echo "$INSTANCE_ID" > "/workspace/vm_instance_id_${IDX}.txt"
+  echo "$VM_NAME" > "/workspace/vm_name_${IDX}.txt"
 
   echo "VM created in zone: $ACTUAL_ZONE"
 
