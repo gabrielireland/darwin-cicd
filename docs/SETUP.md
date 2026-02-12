@@ -48,6 +48,9 @@ mkdir -p cloudbuild-builds/docker/my_project
 cp cicd/templates/Dockerfile.base cloudbuild-builds/docker/my_project/
 cp cicd/templates/Dockerfile cloudbuild-builds/docker/my_project/
 cp cicd/templates/requirements.txt cloudbuild-builds/docker/my_project/
+
+# Optional: run-contract expectations (expected outputs by job_id)
+cp cicd/templates/run_contract_jobs.example.json cloudbuild-builds/config/run_contract_jobs.json
 ```
 
 Edit each file to match your project (update paths, add dependencies, customize CLAUDE.md).

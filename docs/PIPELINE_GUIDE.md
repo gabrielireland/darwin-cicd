@@ -345,3 +345,29 @@ sed -i "s#__PIPE_VALUE__#$${VALUE_WITH_PIPES}#g" /tmp/startup-script.sh
 ### Skipping base image rebuild
 
 Set `_UPDATE_BASE: 'false'` (default). The base image is cached in Artifact Registry and only rebuilt when `_UPDATE_BASE: 'true'`.
+
+### Run contract (expected vs actual outputs)
+
+Add a run-contract initialization before launching the VM, then finalize after outputs are written.
+
+```bash
+# Init (job_id -> expected outputs comes from run_contract_jobs.json)
+bash cicd/utils/run_contract.sh init \
+  --job-id "my-pipeline" \
+  --run-id "${BUILD_ID}" \
+  --spec-file "cloudbuild-builds/config/run_contract_jobs.json" \
+  --run-dir "/workspace/run_contract" \
+  --output-location "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
+  --var OUTPUT_DIR="/tmp/pipeline_output" \
+  --var OUTPUT_GCS="gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}"
+
+# Finalize after processing/upload
+bash cicd/utils/run_contract.sh finalize \
+  --contract-file "/workspace/run_contract/_run_contract.json" \
+  --scan-local-dir "/tmp/pipeline_output" \
+  --scan-gcs-prefix "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
+  --upload-gcs-dir "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
+  --strict
+```
+
+See `docs/RUN_CONTRACT_GUIDE.md` for schema and advanced usage (Cloud Run env generation, produced-asset updates, strict gates).

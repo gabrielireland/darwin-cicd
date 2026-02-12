@@ -193,6 +193,27 @@ vm_pipeline_header() {
 }
 
 # ========================================
+# run_contract_cli_path
+# ========================================
+# Resolve run-contract CLI path if available.
+run_contract_cli_path() {
+  local CANDIDATES=(
+    "${RUN_CONTRACT_CLI:-}"
+    "/workspace/cicd/utils/run_contract.sh"
+    "cicd/utils/run_contract.sh"
+  )
+  local CANDIDATE=""
+  for CANDIDATE in "${CANDIDATES[@]}"; do
+    [ -z "${CANDIDATE}" ] && continue
+    if [ -x "${CANDIDATE}" ]; then
+      echo "${CANDIDATE}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ========================================
 # write_run_contract
 # ========================================
 # Write initial run contract JSON
@@ -208,6 +229,24 @@ write_run_contract() {
   echo "=========================================="
   echo "Writing Run Contract"
   echo "=========================================="
+
+  local RUN_CONTRACT_CLI_PATH=""
+  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    if "${RUN_CONTRACT_CLI_PATH}" init \
+      --contract-file "${CONTRACT_FILE}" \
+      --job-id "${PIPELINE_TITLE:-pipeline}" \
+      --run-id "${BUILD_ID:-}" \
+      --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
+      --output-location "${OUTPUT_GCS}" \
+      --config-json "${CONFIG_JSON}" \
+      --inputs-json "${INPUTS_JSON}" \
+      --expected-assets-json "${EXPECTED_OUTPUTS_JSON}" \
+      --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"; then
+      echo "Run contract written (CLI): ${CONTRACT_FILE}"
+      return 0
+    fi
+    echo "WARNING: run_contract.sh init failed, falling back to legacy contract format"
+  fi
 
   cat > "$CONTRACT_FILE" << EOF
 {
@@ -245,6 +284,25 @@ update_run_contract() {
 
   echo ""
   echo "Updating run contract..."
+
+  local RUN_CONTRACT_CLI_PATH=""
+  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    local CLI_ARGS=(
+      finalize
+      --contract-file "${CONTRACT_FILE}"
+      --status "${STATUS}"
+      --output-location "${OUTPUT_GCS}"
+      --verification-json "${VERIFICATION_JSON}"
+    )
+    if [[ "${OUTPUT_GCS}" == gs://* ]]; then
+      CLI_ARGS+=(--upload-gcs-dir "${OUTPUT_GCS}")
+    fi
+    if "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
+      echo "Run contract updated (CLI): status=${STATUS}"
+      return 0
+    fi
+    echo "WARNING: run_contract.sh finalize failed, falling back to legacy contract format"
+  fi
 
   cat > "$CONTRACT_FILE" << EOF
 {
