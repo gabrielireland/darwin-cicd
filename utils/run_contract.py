@@ -225,26 +225,29 @@ def _normalize_tasks_and_assets(
     now_iso: str,
     job_def: Mapping[str, Any],
     expected_assets_override: List[Mapping[str, Any]] | None,
+    expected_inputs_override: List[Mapping[str, Any]] | None = None,
     context: Mapping[str, str],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     tasks_raw = list(job_def.get("tasks") or [])
 
-    if expected_assets_override is not None:
+    if expected_assets_override is not None or expected_inputs_override is not None:
         tasks_raw = [
             {
                 "task_id": str(job_def.get("default_task_id") or job_id),
                 "labels": dict(job_def.get("default_labels") or {}),
-                "expected_assets": list(expected_assets_override),
+                "expected_assets": list(expected_assets_override or job_def.get("expected_assets") or []),
+                "expected_inputs": list(expected_inputs_override or job_def.get("expected_inputs") or []),
             }
         ]
 
     if not tasks_raw:
-        if job_def.get("expected_assets"):
+        if job_def.get("expected_assets") or job_def.get("expected_inputs"):
             tasks_raw = [
                 {
                     "task_id": str(job_def.get("default_task_id") or job_id),
                     "labels": dict(job_def.get("default_labels") or {}),
                     "expected_assets": list(job_def.get("expected_assets") or []),
+                    "expected_inputs": list(job_def.get("expected_inputs") or []),
                 }
             ]
         else:
@@ -253,6 +256,7 @@ def _normalize_tasks_and_assets(
                     "task_id": str(job_def.get("default_task_id") or job_id),
                     "labels": dict(job_def.get("default_labels") or {}),
                     "expected_assets": [],
+                    "expected_inputs": [],
                 }
             ]
 
@@ -286,14 +290,21 @@ def _normalize_tasks_and_assets(
         }
         tasks.append(task_record)
 
-        expected_assets = list(task_raw.get("expected_assets") or [])
-        for asset_index, asset_raw in enumerate(expected_assets, start=1):
+        # Build combined list: (asset_raw, role) for outputs and inputs
+        role_tagged: List[Tuple[Mapping[str, Any], str]] = []
+        for a in list(task_raw.get("expected_assets") or []):
+            role_tagged.append((a, "output"))
+        for a in list(task_raw.get("expected_inputs") or []):
+            role_tagged.append((a, "input"))
+
+        for asset_index, (asset_raw, role) in enumerate(role_tagged, start=1):
             if not isinstance(asset_raw, dict):
                 raise ValueError(
-                    f"Expected asset #{asset_index} in task {task_id!r} must be an object"
+                    f"Expected {role} asset #{asset_index} in task {task_id!r} must be an object"
                 )
 
-            asset_id_raw = asset_raw.get("asset_id") or f"{task_id}/asset_{asset_index}"
+            default_suffix = "asset" if role == "output" else "input"
+            asset_id_raw = asset_raw.get("asset_id") or f"{task_id}/{default_suffix}_{asset_index}"
             asset_id = str(_apply_templates(str(asset_id_raw), context))
             if asset_id in seen_assets:
                 raise ValueError(f"Duplicate asset_id in contract definition: {asset_id}")
@@ -307,6 +318,7 @@ def _normalize_tasks_and_assets(
             asset_record = {
                 "asset_id": asset_id,
                 "task_id": task_id,
+                "role": role,
                 "kind": str(asset_raw.get("kind") or "output"),
                 "required": bool(asset_raw.get("required", True)),
                 "uri": _apply_templates(uri, context) if uri is not None else None,
@@ -406,6 +418,11 @@ def _load_contract(contract_file: Path) -> Dict[str, Any]:
         raise ValueError("Contract key 'tasks' must be a list")
     if not isinstance(data["assets"], list):
         raise ValueError("Contract key 'assets' must be a list")
+
+    # Backward compat: ensure every asset has a role field
+    for asset in data["assets"]:
+        asset.setdefault("role", "output")
+
     return data
 
 
@@ -459,9 +476,16 @@ def _write_jsonl_and_summary(contract: Mapping[str, Any]) -> None:
         task_status_counts[status] = task_status_counts.get(status, 0) + 1
 
     asset_status_counts: Dict[str, int] = {}
+    input_asset_status_counts: Dict[str, int] = {}
+    output_asset_status_counts: Dict[str, int] = {}
     for asset in contract.get("assets", []):
         status = str(asset.get("status") or "unknown")
         asset_status_counts[status] = asset_status_counts.get(status, 0) + 1
+        role = str(asset.get("role") or "output")
+        if role == "input":
+            input_asset_status_counts[status] = input_asset_status_counts.get(status, 0) + 1
+        else:
+            output_asset_status_counts[status] = output_asset_status_counts.get(status, 0) + 1
 
     summary = {
         "schema_version": int(contract.get("schema_version") or SCHEMA_VERSION),
@@ -472,6 +496,8 @@ def _write_jsonl_and_summary(contract: Mapping[str, Any]) -> None:
         "finished_at": run_meta.get("completed_at"),
         "task_status_counts": task_status_counts,
         "asset_status_counts": asset_status_counts,
+        "input_asset_status_counts": input_asset_status_counts,
+        "output_asset_status_counts": output_asset_status_counts,
         "verification": contract.get("verification", {}),
         "paths": {
             "contract_json": str(paths.get("contract_json") or "_run_contract.json"),
@@ -523,6 +549,7 @@ def _ensure_asset(contract: MutableMapping[str, Any], asset_id: str, task_id: st
     asset = {
         "asset_id": asset_id,
         "task_id": task_id,
+        "role": "output",
         "kind": "output",
         "required": True,
         "uri": None,
@@ -757,6 +784,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     spec_file = Path(args.spec_file).expanduser().resolve() if args.spec_file else None
     expected_assets_override: List[Mapping[str, Any]] | None = None
+    expected_inputs_override: List[Mapping[str, Any]] | None = None
 
     if args.expected_assets_file:
         expected_assets_override = _load_json_file(Path(args.expected_assets_file).expanduser())
@@ -771,6 +799,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if not isinstance(parsed, list):
             raise ValueError("--expected-assets-json must be a JSON array")
         expected_assets_override = parsed
+
+    if args.expected_inputs_file:
+        expected_inputs_override = _load_json_file(Path(args.expected_inputs_file).expanduser())
+        if not isinstance(expected_inputs_override, list):
+            raise ValueError("--expected-inputs-file must be a JSON array")
+    elif args.expected_inputs_json:
+        parsed = _parse_json_string(
+            args.expected_inputs_json,
+            default=[],
+            arg_name="--expected-inputs-json",
+        )
+        if not isinstance(parsed, list):
+            raise ValueError("--expected-inputs-json must be a JSON array")
+        expected_inputs_override = parsed
 
     vars_map: Dict[str, Any] = {}
     vars_map.update(runtime_meta)
@@ -816,6 +858,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         now_iso=now_iso,
         job_def=job_def,
         expected_assets_override=expected_assets_override,
+        expected_inputs_override=expected_inputs_override,
         context=template_ctx,
     )
 
@@ -845,9 +888,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     _write_contract_bundle(contract)
 
+    input_count = sum(1 for a in assets if a.get("role") == "input")
+    output_count = sum(1 for a in assets if a.get("role") == "output")
+
     print(f"run_contract init: {contract_file}")
     print(f"run_id={run_id}")
-    print(f"tasks={len(tasks)} assets={len(assets)}")
+    print(f"tasks={len(tasks)} assets={len(assets)} (inputs={input_count} outputs={output_count})")
     return 0
 
 
@@ -911,6 +957,77 @@ def _cmd_mark_task(args: argparse.Namespace, *, status: str) -> int:
     _set_task_status(contract, task_id=str(args.task_id), status=status, error=error)
     _write_contract_bundle(contract)
     print(f"run_contract mark-task-{status}: task={args.task_id}")
+    return 0
+
+
+def _cmd_preflight(args: argparse.Namespace) -> int:
+    contract_file = Path(args.contract_file).expanduser().resolve()
+    contract = _load_contract(contract_file)
+
+    assets = contract.get("assets", [])
+    input_assets = [a for a in assets if a.get("role") == "input"]
+
+    now_iso = _utc_now_iso()
+    missing_required: List[str] = []
+    missing_optional: List[str] = []
+    ok_count = 0
+
+    for asset in input_assets:
+        exists, exists_reason, matched = _asset_exists(asset)
+        asset["exists"] = exists
+        asset["exists_reason"] = exists_reason
+        if matched:
+            asset["matched_outputs"] = matched[:200]
+
+        aid = str(asset.get("asset_id") or "")
+        required = bool(asset.get("required", True))
+
+        if exists is True:
+            asset["status"] = "ok"
+            ok_count += 1
+            tag = "[OK]     "
+            loc = asset.get("uri") or asset.get("local_path") or asset.get("local_glob") or asset.get("gcs_glob") or ""
+            print(f"  {tag} {aid:<30s} {loc}")
+        elif exists is False:
+            asset["status"] = "missing"
+            if required:
+                missing_required.append(aid)
+            else:
+                missing_optional.append(aid)
+            req_label = "(required)" if required else "(optional)"
+            loc = asset.get("uri") or asset.get("local_path") or asset.get("local_glob") or asset.get("gcs_glob") or ""
+            print(f"  [MISSING] {aid:<30s} {loc}  {req_label}")
+        else:
+            asset["status"] = "unknown"
+            loc = asset.get("uri") or asset.get("local_path") or asset.get("local_glob") or asset.get("gcs_glob") or ""
+            print(f"  [UNKNOWN] {aid:<30s} {loc}")
+
+    contract["preflight"] = {
+        "checked_at": now_iso,
+        "total_inputs": len(input_assets),
+        "ok": ok_count,
+        "missing_required": missing_required,
+        "missing_required_count": len(missing_required),
+        "missing_optional": missing_optional,
+        "missing_optional_count": len(missing_optional),
+    }
+
+    _write_contract_bundle(contract)
+
+    if args.upload_gcs_dir:
+        ok_upload, err = _upload_bundle_to_gcs(contract, args.upload_gcs_dir)
+        if not ok_upload:
+            print(f"WARNING: GCS upload failed: {err}", file=sys.stderr)
+
+    print(f"run_contract preflight: {contract_file}")
+    print(
+        f"total_inputs={len(input_assets)} ok={ok_count} "
+        f"missing_required={len(missing_required)} missing_optional={len(missing_optional)}"
+    )
+
+    if args.strict and missing_required:
+        return 2
+
     return 0
 
 
@@ -1052,9 +1169,19 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
         task_status_counts[final_status] = task_status_counts.get(final_status, 0) + 1
 
     asset_status_counts: Dict[str, int] = {}
+    input_asset_status_counts: Dict[str, int] = {}
+    output_asset_status_counts: Dict[str, int] = {}
+    missing_required_input_ids: List[str] = []
     for asset in assets:
         st = str(asset.get("status") or "unknown")
         asset_status_counts[st] = asset_status_counts.get(st, 0) + 1
+        role = str(asset.get("role") or "output")
+        if role == "input":
+            input_asset_status_counts[st] = input_asset_status_counts.get(st, 0) + 1
+            if st in {"missing", "failed"} and bool(asset.get("required", True)):
+                missing_required_input_ids.append(str(asset.get("asset_id") or ""))
+        else:
+            output_asset_status_counts[st] = output_asset_status_counts.get(st, 0) + 1
 
     verification: Dict[str, Any] = {
         "finished_at": now_iso,
@@ -1062,8 +1189,11 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
         "produced_assets_count": sum(1 for asset in assets if bool(asset.get("produced"))),
         "required_assets_count": sum(1 for asset in assets if bool(asset.get("required", True))),
         "asset_status_counts": asset_status_counts,
+        "input_asset_status_counts": input_asset_status_counts,
+        "output_asset_status_counts": output_asset_status_counts,
         "task_status_counts": task_status_counts,
         "missing_required_asset_ids": sorted(set(missing_required)),
+        "missing_required_input_ids": sorted(set(missing_required_input_ids)),
         "corrupt_required_asset_ids": sorted(set(corrupt_required)),
         "unverified_required_asset_ids": sorted(set(unknown_required)),
         "unexpected_outputs": unexpected_outputs,
@@ -1115,6 +1245,10 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
         "required_unverified="
         f"{len(verification.get('unverified_required_asset_ids') or [])}"
     )
+    if input_asset_status_counts:
+        print(f"input_assets={input_asset_status_counts}")
+    if output_asset_status_counts:
+        print(f"output_assets={output_asset_status_counts}")
 
     if args.strict:
         if (
@@ -1180,8 +1314,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--pipeline-title", help="Human-readable pipeline title")
     p_init.add_argument("--output-location", help="Primary output root/path")
     p_init.add_argument("--spec-file", help="JSON job expectations file")
-    p_init.add_argument("--expected-assets-file", help="JSON array of expected assets")
-    p_init.add_argument("--expected-assets-json", help="JSON array of expected assets")
+    p_init.add_argument("--expected-assets-file", help="JSON array of expected output assets")
+    p_init.add_argument("--expected-assets-json", help="JSON array of expected output assets")
+    p_init.add_argument("--expected-inputs-file", help="JSON array of expected input assets")
+    p_init.add_argument("--expected-inputs-json", help="JSON array of expected input assets")
     p_init.add_argument("--config-json", help="JSON object for configuration")
     p_init.add_argument("--inputs-json", help="JSON object for input data")
     p_init.add_argument("--run-metadata-json", help="JSON object merged into run.extra")
@@ -1189,6 +1325,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--vars-json", help="JSON object of template variables")
     p_init.add_argument("--var", action="append", help="Template variable KEY=VALUE (repeatable)")
     p_init.set_defaults(func=_cmd_init)
+
+    p_pre = sub.add_parser("preflight", help="Verify all input assets exist before processing")
+    p_pre.add_argument("--contract-file", required=True, help="Path to _run_contract.json")
+    p_pre.add_argument("--strict", action="store_true", help="Exit 2 if any required inputs are missing")
+    p_pre.add_argument("--upload-gcs-dir", help="Upload contract bundle to gs:// bucket path")
+    p_pre.set_defaults(func=_cmd_preflight)
 
     p_prod = sub.add_parser("record-produced", help="Upsert a produced asset")
     p_prod.add_argument("--contract-file", required=True)

@@ -224,6 +224,7 @@ write_run_contract() {
   local CONFIG_JSON="${3:-{}}"
   local INPUTS_JSON="${4:-{}}"
   local EXPECTED_OUTPUTS_JSON="${5:-[]}"
+  local EXPECTED_INPUTS_JSON="${6:-[]}"
 
   echo ""
   echo "=========================================="
@@ -232,16 +233,22 @@ write_run_contract() {
 
   local RUN_CONTRACT_CLI_PATH=""
   if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
-    if "${RUN_CONTRACT_CLI_PATH}" init \
-      --contract-file "${CONTRACT_FILE}" \
-      --job-id "${PIPELINE_TITLE:-pipeline}" \
-      --run-id "${BUILD_ID:-}" \
-      --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
-      --output-location "${OUTPUT_GCS}" \
-      --config-json "${CONFIG_JSON}" \
-      --inputs-json "${INPUTS_JSON}" \
-      --expected-assets-json "${EXPECTED_OUTPUTS_JSON}" \
-      --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"; then
+    local CLI_ARGS=(
+      init
+      --contract-file "${CONTRACT_FILE}"
+      --job-id "${PIPELINE_TITLE:-pipeline}"
+      --run-id "${BUILD_ID:-}"
+      --pipeline-title "${PIPELINE_TITLE:-pipeline}"
+      --output-location "${OUTPUT_GCS}"
+      --config-json "${CONFIG_JSON}"
+      --inputs-json "${INPUTS_JSON}"
+      --expected-assets-json "${EXPECTED_OUTPUTS_JSON}"
+      --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"
+    )
+    if [ "${EXPECTED_INPUTS_JSON}" != "[]" ]; then
+      CLI_ARGS+=(--expected-inputs-json "${EXPECTED_INPUTS_JSON}")
+    fi
+    if "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
       echo "Run contract written (CLI): ${CONTRACT_FILE}"
       return 0
     fi
@@ -268,6 +275,39 @@ write_run_contract() {
 EOF
 
   echo "Run contract written: ${CONTRACT_FILE}"
+}
+
+# ========================================
+# preflight_run_contract
+# ========================================
+# Verify all input assets exist before processing starts.
+# Usage: preflight_run_contract "$CONTRACT_FILE" [--strict]
+# Returns: CLI exit code (0=ok, 2=strict failure with missing required inputs)
+# If CLI unavailable: warns and returns 0 (callers use preflight_check.sh fallback)
+preflight_run_contract() {
+  local CONTRACT_FILE="$1"
+  local STRICT="${2:-}"
+
+  echo ""
+  echo "=========================================="
+  echo "Preflight: Checking Input Assets"
+  echo "=========================================="
+
+  local RUN_CONTRACT_CLI_PATH=""
+  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    local CLI_ARGS=(
+      preflight
+      --contract-file "${CONTRACT_FILE}"
+    )
+    if [ "${STRICT}" = "--strict" ]; then
+      CLI_ARGS+=(--strict)
+    fi
+    "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"
+    return $?
+  fi
+
+  echo "WARNING: run_contract CLI not available, skipping preflight check"
+  return 0
 }
 
 # ========================================
