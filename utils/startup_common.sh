@@ -199,6 +199,7 @@ vm_pipeline_header() {
 run_contract_cli_path() {
   local CANDIDATES=(
     "${RUN_CONTRACT_CLI:-}"
+    "/tmp/cicd_utils/run_contract.sh"
     "/workspace/cicd/utils/run_contract.sh"
     "cicd/utils/run_contract.sh"
   )
@@ -222,8 +223,8 @@ write_run_contract() {
   local CONTRACT_FILE="$1"
   local OUTPUT_GCS="$2"
   local CONFIG_JSON="${3:-{}}"
-  local INPUTS_JSON="${4:-{}}"
-  local EXPECTED_OUTPUTS_JSON="${5:-[]}"
+  local INPUTS_JSON="${4:-}"
+  local EXPECTED_OUTPUTS_JSON="${5:-}"
   local EXPECTED_INPUTS_JSON="${6:-[]}"
 
   echo ""
@@ -231,50 +232,43 @@ write_run_contract() {
   echo "Writing Run Contract"
   echo "=========================================="
 
-  local RUN_CONTRACT_CLI_PATH=""
-  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
-    local CLI_ARGS=(
-      init
-      --contract-file "${CONTRACT_FILE}"
-      --job-id "${PIPELINE_TITLE:-pipeline}"
-      --run-id "${BUILD_ID:-}"
-      --pipeline-title "${PIPELINE_TITLE:-pipeline}"
-      --output-location "${OUTPUT_GCS}"
-      --config-json "${CONFIG_JSON}"
-      --inputs-json "${INPUTS_JSON}"
-      --expected-assets-json "${EXPECTED_OUTPUTS_JSON}"
-      --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"
-    )
-    if [ "${EXPECTED_INPUTS_JSON}" != "[]" ]; then
-      CLI_ARGS+=(--expected-inputs-json "${EXPECTED_INPUTS_JSON}")
-    fi
-    if "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
-      echo "Run contract written (CLI): ${CONTRACT_FILE}"
-      return 0
-    fi
-    echo "WARNING: run_contract.sh init failed, falling back to legacy contract format"
+  # Mandatory: inputs and expected_outputs must always be provided
+  if [ -z "${INPUTS_JSON}" ] || [ "${INPUTS_JSON}" = "{}" ]; then
+    echo "ERROR: write_run_contract requires inputs_json (arg 4). Cannot be empty." >&2
+    return 1
+  fi
+  if [ -z "${EXPECTED_OUTPUTS_JSON}" ] || [ "${EXPECTED_OUTPUTS_JSON}" = "[]" ]; then
+    echo "ERROR: write_run_contract requires expected_outputs_json (arg 5). Cannot be empty." >&2
+    return 1
   fi
 
-  cat > "$CONTRACT_FILE" << EOF
-{
-  "_description": "Run contract - written at START of pipeline. Compare with actual outputs to detect incomplete runs.",
-  "run_metadata": {
-    "status": "STARTED",
-    "started_at": "${VM_START_TIME}",
-    "completed_at": null,
-    "build_id": "${BUILD_ID}",
-    "commit_sha": "${COMMIT_SHA}",
-    "vm_name": "${VM_NAME}",
-    "cloudbuild_yaml": "${CLOUDBUILD_YAML}"
-  },
-  "configuration": ${CONFIG_JSON},
-  "input_data": ${INPUTS_JSON},
-  "output_location": "${OUTPUT_GCS}",
-  "expected_outputs": ${EXPECTED_OUTPUTS_JSON}
-}
-EOF
+  local RUN_CONTRACT_CLI_PATH=""
+  if ! RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    echo "ERROR: run_contract CLI not found. Cannot write run contract." >&2
+    return 1
+  fi
 
-  echo "Run contract written: ${CONTRACT_FILE}"
+  local CLI_ARGS=(
+    init
+    --contract-file "${CONTRACT_FILE}"
+    --job-id "${PIPELINE_TITLE:-pipeline}"
+    --run-id "${BUILD_ID:-}"
+    --pipeline-title "${PIPELINE_TITLE:-pipeline}"
+    --output-location "${OUTPUT_GCS}"
+    --config-json "${CONFIG_JSON}"
+    --inputs-json "${INPUTS_JSON}"
+    --expected-assets-json "${EXPECTED_OUTPUTS_JSON}"
+    --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"
+  )
+  if [ "${EXPECTED_INPUTS_JSON}" != "[]" ]; then
+    CLI_ARGS+=(--expected-inputs-json "${EXPECTED_INPUTS_JSON}")
+  fi
+  if ! "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
+    echo "ERROR: run_contract.sh init failed." >&2
+    return 1
+  fi
+
+  echo "Run contract written (CLI): ${CONTRACT_FILE}"
 }
 
 # ========================================
@@ -283,7 +277,6 @@ EOF
 # Verify all input assets exist before processing starts.
 # Usage: preflight_run_contract "$CONTRACT_FILE" [--strict]
 # Returns: CLI exit code (0=ok, 2=strict failure with missing required inputs)
-# If CLI unavailable: warns and returns 0 (callers use preflight_check.sh fallback)
 preflight_run_contract() {
   local CONTRACT_FILE="$1"
   local STRICT="${2:-}"
@@ -294,20 +287,20 @@ preflight_run_contract() {
   echo "=========================================="
 
   local RUN_CONTRACT_CLI_PATH=""
-  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
-    local CLI_ARGS=(
-      preflight
-      --contract-file "${CONTRACT_FILE}"
-    )
-    if [ "${STRICT}" = "--strict" ]; then
-      CLI_ARGS+=(--strict)
-    fi
-    "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"
-    return $?
+  if ! RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    echo "ERROR: run_contract CLI not found. Cannot run preflight check." >&2
+    return 1
   fi
 
-  echo "WARNING: run_contract CLI not available, skipping preflight check"
-  return 0
+  local CLI_ARGS=(
+    preflight
+    --contract-file "${CONTRACT_FILE}"
+  )
+  if [ "${STRICT}" = "--strict" ]; then
+    CLI_ARGS+=(--strict)
+  fi
+  "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"
+  return $?
 }
 
 # ========================================
@@ -320,46 +313,32 @@ update_run_contract() {
   local OUTPUT_GCS="$2"
   local STATUS="$3"
   local VERIFICATION_JSON="${4:-{}}"
-  local COMPLETION_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
   echo ""
   echo "Updating run contract..."
 
   local RUN_CONTRACT_CLI_PATH=""
-  if RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
-    local CLI_ARGS=(
-      finalize
-      --contract-file "${CONTRACT_FILE}"
-      --status "${STATUS}"
-      --output-location "${OUTPUT_GCS}"
-      --verification-json "${VERIFICATION_JSON}"
-    )
-    if [[ "${OUTPUT_GCS}" == gs://* ]]; then
-      CLI_ARGS+=(--upload-gcs-dir "${OUTPUT_GCS}")
-    fi
-    if "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
-      echo "Run contract updated (CLI): status=${STATUS}"
-      return 0
-    fi
-    echo "WARNING: run_contract.sh finalize failed, falling back to legacy contract format"
+  if ! RUN_CONTRACT_CLI_PATH="$(run_contract_cli_path)"; then
+    echo "ERROR: run_contract CLI not found. Cannot update run contract." >&2
+    return 1
   fi
 
-  cat > "$CONTRACT_FILE" << EOF
-{
-  "status": "${STATUS}",
-  "started_at": "${VM_START_TIME}",
-  "completed_at": "${COMPLETION_TIME}",
-  "build_id": "${BUILD_ID}",
-  "commit_sha": "${COMMIT_SHA}",
-  "vm_name": "${VM_NAME}",
-  "cloudbuild_yaml": "${CLOUDBUILD_YAML}",
-  "output_location": "${OUTPUT_GCS}",
-  "verification": ${VERIFICATION_JSON}
-}
-EOF
+  local CLI_ARGS=(
+    finalize
+    --contract-file "${CONTRACT_FILE}"
+    --status "${STATUS}"
+    --output-location "${OUTPUT_GCS}"
+    --verification-json "${VERIFICATION_JSON}"
+  )
+  if [[ "${OUTPUT_GCS}" == gs://* ]]; then
+    CLI_ARGS+=(--upload-gcs-dir "${OUTPUT_GCS}")
+  fi
+  if ! "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
+    echo "ERROR: run_contract.sh finalize failed." >&2
+    return 1
+  fi
 
-  gsutil cp "$CONTRACT_FILE" "${OUTPUT_GCS}/_run_contract.json"
-  echo "Run contract updated: status=${STATUS}"
+  echo "Run contract updated (CLI): status=${STATUS}"
 }
 
 # ========================================

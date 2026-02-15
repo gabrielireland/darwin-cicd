@@ -43,8 +43,33 @@ fi
 # Concatenate preflight + common + pipeline script
 cat "${CICD_ROOT}/utils/preflight_check.sh" \
     "${CICD_ROOT}/utils/startup_common.sh" \
-    "$VM_SCRIPT_PATH" \
     > /tmp/startup-script.sh
+
+# Embed run_contract CLI so it's available on the VM (base64-encoded)
+RUN_CONTRACT_PY="${CICD_ROOT}/utils/run_contract.py"
+RUN_CONTRACT_SH="${CICD_ROOT}/utils/run_contract.sh"
+
+if [[ -f "$RUN_CONTRACT_PY" && -f "$RUN_CONTRACT_SH" ]]; then
+  PY_B64=$(base64 -w0 "$RUN_CONTRACT_PY" 2>/dev/null || base64 "$RUN_CONTRACT_PY")
+  SH_B64=$(base64 -w0 "$RUN_CONTRACT_SH" 2>/dev/null || base64 "$RUN_CONTRACT_SH")
+  cat >> /tmp/startup-script.sh << EMBED_EOF
+
+# ---- Auto-embedded run_contract CLI (extracted at VM boot) ----
+_CICD_CLI_DIR="/tmp/cicd_utils"
+mkdir -p "\$_CICD_CLI_DIR"
+echo "${PY_B64}" | base64 -d > "\$_CICD_CLI_DIR/run_contract.py"
+echo "${SH_B64}" | base64 -d > "\$_CICD_CLI_DIR/run_contract.sh"
+chmod +x "\$_CICD_CLI_DIR/run_contract.sh" "\$_CICD_CLI_DIR/run_contract.py"
+export RUN_CONTRACT_CLI="\$_CICD_CLI_DIR/run_contract.sh"
+EMBED_EOF
+  echo "Run contract CLI embedded into startup script"
+else
+  echo "ERROR: run_contract CLI not found at ${RUN_CONTRACT_PY} or ${RUN_CONTRACT_SH}" >&2
+  exit 1
+fi
+
+# Append pipeline-specific script
+cat "$VM_SCRIPT_PATH" >> /tmp/startup-script.sh
 chmod +x /tmp/startup-script.sh
 
 # Resolve values (CloudBuild substitution wins, then defaults)
