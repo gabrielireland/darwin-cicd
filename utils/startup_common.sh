@@ -255,16 +255,24 @@ write_run_contract() {
     return 1
   fi
 
-  local RUN_METADATA_JSON
-  RUN_METADATA_JSON=$(python3 -c "
-import json, sys
-print(json.dumps({
-    'vm_name': sys.argv[1],
-    'cloudbuild_yaml': sys.argv[2],
-    'commit_sha': sys.argv[3],
-    'build_id': sys.argv[4]
+  # Write all JSON args to temp files to avoid CLI argument passing issues
+  local JSON_TMP="/tmp/run_contract_args_$$"
+  mkdir -p "${JSON_TMP}"
+
+  echo "${CONFIG_JSON}" > "${JSON_TMP}/config.json"
+  echo "${INPUTS_JSON}" > "${JSON_TMP}/inputs.json"
+  echo "${EXPECTED_OUTPUTS_JSON}" > "${JSON_TMP}/expected_outputs.json"
+
+  python3 -c "
+import json, sys, pathlib
+tmp = pathlib.Path(sys.argv[1])
+(tmp / 'run_metadata.json').write_text(json.dumps({
+    'vm_name': sys.argv[2],
+    'cloudbuild_yaml': sys.argv[3],
+    'commit_sha': sys.argv[4],
+    'build_id': sys.argv[5]
 }))
-" "${VM_NAME:-}" "${CLOUDBUILD_YAML:-}" "${COMMIT_SHA:-}" "${BUILD_ID:-}")
+" "${JSON_TMP}" "${VM_NAME:-}" "${CLOUDBUILD_YAML:-}" "${COMMIT_SHA:-}" "${BUILD_ID:-}"
 
   local CLI_ARGS=(
     init
@@ -273,13 +281,14 @@ print(json.dumps({
     --run-id "${BUILD_ID:-}"
     --pipeline-title "${PIPELINE_TITLE:-pipeline}"
     --output-location "${OUTPUT_GCS}"
-    --config-json "${CONFIG_JSON}"
-    --inputs-json "${INPUTS_JSON}"
-    --expected-assets-json "${EXPECTED_OUTPUTS_JSON}"
-    --run-metadata-json "${RUN_METADATA_JSON}"
+    --config-json-file "${JSON_TMP}/config.json"
+    --inputs-json-file "${JSON_TMP}/inputs.json"
+    --expected-assets-file "${JSON_TMP}/expected_outputs.json"
+    --run-metadata-json-file "${JSON_TMP}/run_metadata.json"
   )
   if [ "${EXPECTED_INPUTS_JSON}" != "[]" ]; then
-    CLI_ARGS+=(--expected-inputs-json "${EXPECTED_INPUTS_JSON}")
+    echo "${EXPECTED_INPUTS_JSON}" > "${JSON_TMP}/expected_inputs.json"
+    CLI_ARGS+=(--expected-inputs-file "${JSON_TMP}/expected_inputs.json")
   fi
   if ! "${RUN_CONTRACT_CLI_PATH}" "${CLI_ARGS[@]}"; then
     echo "ERROR: run_contract.sh init failed." >&2
@@ -341,12 +350,17 @@ update_run_contract() {
     return 1
   fi
 
+  # Write verification JSON to file to avoid CLI argument passing issues
+  local JSON_TMP="/tmp/run_contract_finalize_$$"
+  mkdir -p "${JSON_TMP}"
+  echo "${VERIFICATION_JSON}" > "${JSON_TMP}/verification.json"
+
   local CLI_ARGS=(
     finalize
     --contract-file "${CONTRACT_FILE}"
     --status "${STATUS}"
     --output-location "${OUTPUT_GCS}"
-    --verification-json "${VERIFICATION_JSON}"
+    --verification-json-file "${JSON_TMP}/verification.json"
   )
   if [[ "${OUTPUT_GCS}" == gs://* ]]; then
     CLI_ARGS+=(--upload-gcs-dir "${OUTPUT_GCS}")

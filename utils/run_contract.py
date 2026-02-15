@@ -137,15 +137,6 @@ def _parse_bool(raw: str | None, default: bool = False) -> bool:
     return bool(default)
 
 
-def _parse_json_string(raw: str | None, *, default: Any = None, arg_name: str = "json") -> Any:
-    if raw is None:
-        return default
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON for {arg_name}: {exc}") from exc
-
-
 def _parse_vars(pairs: Iterable[str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for pair in pairs:
@@ -790,29 +781,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         expected_assets_override = _load_json_file(Path(args.expected_assets_file).expanduser())
         if not isinstance(expected_assets_override, list):
             raise ValueError("--expected-assets-file must be a JSON array")
-    elif args.expected_assets_json:
-        parsed = _parse_json_string(
-            args.expected_assets_json,
-            default=[],
-            arg_name="--expected-assets-json",
-        )
-        if not isinstance(parsed, list):
-            raise ValueError("--expected-assets-json must be a JSON array")
-        expected_assets_override = parsed
 
     if args.expected_inputs_file:
         expected_inputs_override = _load_json_file(Path(args.expected_inputs_file).expanduser())
         if not isinstance(expected_inputs_override, list):
             raise ValueError("--expected-inputs-file must be a JSON array")
-    elif args.expected_inputs_json:
-        parsed = _parse_json_string(
-            args.expected_inputs_json,
-            default=[],
-            arg_name="--expected-inputs-json",
-        )
-        if not isinstance(parsed, list):
-            raise ValueError("--expected-inputs-json must be a JSON array")
-        expected_inputs_override = parsed
 
     vars_map: Dict[str, Any] = {}
     vars_map.update(runtime_meta)
@@ -837,12 +810,6 @@ def _cmd_init(args: argparse.Namespace) -> int:
             raise ValueError("--vars-file must be a JSON object")
         vars_map.update(vars_from_file)
 
-    if args.vars_json:
-        vars_from_json = _parse_json_string(args.vars_json, default={}, arg_name="--vars-json")
-        if not isinstance(vars_from_json, dict):
-            raise ValueError("--vars-json must be a JSON object")
-        vars_map.update(vars_from_json)
-
     vars_map.update(_parse_vars(args.var or []))
 
     template_ctx = _to_string_context(vars_map)
@@ -862,13 +829,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
         context=template_ctx,
     )
 
-    config_json = _parse_json_string(args.config_json, default={}, arg_name="--config-json")
-    inputs_json = _parse_json_string(args.inputs_json, default={}, arg_name="--inputs-json")
-    run_metadata_json = _parse_json_string(
-        args.run_metadata_json,
-        default=None,
-        arg_name="--run-metadata-json",
-    )
+    config_json = _load_json_file(Path(args.config_json_file).expanduser()) if args.config_json_file else {}
+    inputs_json = _load_json_file(Path(args.inputs_json_file).expanduser()) if args.inputs_json_file else {}
+    run_metadata_json = _load_json_file(Path(args.run_metadata_json_file).expanduser()) if args.run_metadata_json_file else None
 
     contract = _new_contract(
         contract_file=contract_file,
@@ -926,10 +889,10 @@ def _cmd_record_produced(args: argparse.Namespace) -> int:
     asset["produced"] = True
     asset["status"] = "produced"
 
-    if args.extra_json:
-        extra = _parse_json_string(args.extra_json, default={}, arg_name="--extra-json")
+    if args.extra_json_file:
+        extra = _load_json_file(Path(args.extra_json_file).expanduser())
         if not isinstance(extra, dict):
-            raise ValueError("--extra-json must be a JSON object")
+            raise ValueError("--extra-json-file must be a JSON object")
         merged = dict(asset.get("extra") or {})
         merged.update(extra)
         asset["extra"] = merged
@@ -949,10 +912,10 @@ def _cmd_mark_task(args: argparse.Namespace, *, status: str) -> int:
     contract = _load_contract(contract_file)
 
     error = None
-    if args.error_json:
-        error = _parse_json_string(args.error_json, default={}, arg_name="--error-json")
+    if args.error_json_file:
+        error = _load_json_file(Path(args.error_json_file).expanduser())
         if not isinstance(error, dict):
-            raise ValueError("--error-json must be a JSON object")
+            raise ValueError("--error-json-file must be a JSON object")
 
     _set_task_status(contract, task_id=str(args.task_id), status=status, error=error)
     _write_contract_bundle(contract)
@@ -1200,10 +1163,10 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
         "unexpected_outputs_count": len(unexpected_outputs),
     }
 
-    if args.verification_json:
-        extra = _parse_json_string(args.verification_json, default={}, arg_name="--verification-json")
+    if args.verification_json_file:
+        extra = _load_json_file(Path(args.verification_json_file).expanduser())
         if not isinstance(extra, dict):
-            raise ValueError("--verification-json must be a JSON object")
+            raise ValueError("--verification-json-file must be a JSON object")
         verification.update(extra)
 
     run_meta = contract.setdefault("run", {})
@@ -1315,14 +1278,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--output-location", help="Primary output root/path")
     p_init.add_argument("--spec-file", help="JSON job expectations file")
     p_init.add_argument("--expected-assets-file", help="JSON array of expected output assets")
-    p_init.add_argument("--expected-assets-json", help="JSON array of expected output assets")
     p_init.add_argument("--expected-inputs-file", help="JSON array of expected input assets")
-    p_init.add_argument("--expected-inputs-json", help="JSON array of expected input assets")
-    p_init.add_argument("--config-json", help="JSON object for configuration")
-    p_init.add_argument("--inputs-json", help="JSON object for input data")
-    p_init.add_argument("--run-metadata-json", help="JSON object merged into run.extra")
+    p_init.add_argument("--config-json-file", help="File containing JSON object for configuration")
+    p_init.add_argument("--inputs-json-file", help="File containing JSON object for input data")
+    p_init.add_argument("--run-metadata-json-file", help="File containing JSON object merged into run.extra")
     p_init.add_argument("--vars-file", help="JSON object of template variables")
-    p_init.add_argument("--vars-json", help="JSON object of template variables")
     p_init.add_argument("--var", action="append", help="Template variable KEY=VALUE (repeatable)")
     p_init.set_defaults(func=_cmd_init)
 
@@ -1342,32 +1302,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p_prod.add_argument("--local-path", help="Local file path")
     p_prod.add_argument("--local-glob", help="Local glob pattern")
     p_prod.add_argument("--gcs-glob", help="GCS glob pattern")
-    p_prod.add_argument("--extra-json", help="JSON object merged into asset.extra")
+    p_prod.add_argument("--extra-json-file", help="File containing JSON object merged into asset.extra")
     p_prod.set_defaults(func=_cmd_record_produced)
 
     p_running = sub.add_parser("mark-task-running", help="Mark task as running")
     p_running.add_argument("--contract-file", required=True)
     p_running.add_argument("--task-id", required=True)
-    p_running.add_argument("--error-json", help="Optional JSON error object")
+    p_running.add_argument("--error-json-file", help="File containing optional JSON error object")
     p_running.set_defaults(func=lambda a: _cmd_mark_task(a, status="running"))
 
     p_success = sub.add_parser("mark-task-succeeded", help="Mark task as succeeded")
     p_success.add_argument("--contract-file", required=True)
     p_success.add_argument("--task-id", required=True)
-    p_success.add_argument("--error-json", help="Optional JSON error object")
+    p_success.add_argument("--error-json-file", help="File containing optional JSON error object")
     p_success.set_defaults(func=lambda a: _cmd_mark_task(a, status="succeeded"))
 
     p_failed = sub.add_parser("mark-task-failed", help="Mark task as failed")
     p_failed.add_argument("--contract-file", required=True)
     p_failed.add_argument("--task-id", required=True)
-    p_failed.add_argument("--error-json", help="JSON error object")
+    p_failed.add_argument("--error-json-file", help="File containing JSON error object")
     p_failed.set_defaults(func=lambda a: _cmd_mark_task(a, status="failed"))
 
     p_finalize = sub.add_parser("finalize", help="Finalize run contract with expected-vs-actual audits")
     p_finalize.add_argument("--contract-file", required=True)
     p_finalize.add_argument("--status", help="Override final run status")
     p_finalize.add_argument("--output-location", help="Override run.output_location")
-    p_finalize.add_argument("--verification-json", help="JSON object merged into verification")
+    p_finalize.add_argument("--verification-json-file", help="File containing JSON object merged into verification")
     p_finalize.add_argument("--audit-corruption", help="true|false (default: true)")
     p_finalize.add_argument("--scan-local-dir", action="append", help="Directory to scan for actual outputs")
     p_finalize.add_argument("--scan-gcs-prefix", action="append", help="GCS prefix to scan for actual outputs")
