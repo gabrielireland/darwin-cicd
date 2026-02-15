@@ -158,7 +158,48 @@ When changing a shared value, update `defaults.yaml` FIRST, then update all YAML
 - Files >20GB: MUST use VM
 - VM default: `n2-highmem-16` (128GB RAM)
 
-### 2.10 GCS Upload Pattern
+### 2.10 GeoTIFF Compression (CRITICAL)
+
+**RULE**: When writing float32 GeoTIFF files, ALWAYS use `deflate` compression with `predictor=2`.
+
+```python
+# WRONG — LZW without predictor on float32 data EXPANDS the file (can be 4-5x larger than raw!)
+profile = {'compress': 'lzw', ...}
+
+# CORRECT — deflate + horizontal differencing predictor
+profile = {
+    'compress': 'deflate',
+    'predictor': 2,
+    'zlevel': 6,
+    'tiled': True,
+    'blockxsize': 256,
+    'blockysize': 256,
+    'BIGTIFF': 'YES',  # Required for files > 4GB
+    ...
+}
+```
+
+**Why**: `predictor=2` transforms the data before compression by storing differences between adjacent pixels. For spatial data, neighboring pixels have similar values, so differences are small and compress well. Without it, float32 bytes look random to LZW/deflate and compression fails catastrophically.
+
+### 2.11 VM Disk Hygiene
+
+**RULE**: VM scripts MUST clean up intermediate/source files after conversion steps to free disk.
+
+```bash
+# WRONG — source files left on disk after conversion, eating disk during next step
+gsutil -m cp -r "$ZARR_SOURCE/*" "$LOCAL_ZARR/"
+docker run ... convert.py --input "$LOCAL_ZARR" --output "$LOCAL_TIF"
+# zarr still on disk when next conversion starts!
+
+# CORRECT — clean up source after successful conversion
+gsutil -m cp -r "$ZARR_SOURCE/*" "$LOCAL_ZARR/"
+docker run ... convert.py --input "$LOCAL_ZARR" --output "$LOCAL_TIF"
+rm -rf "$LOCAL_ZARR"  # Free disk before next step
+```
+
+**Why**: VM boot disks are finite. Multi-step pipelines that download, convert, and process large files can silently run out of disk if intermediate files accumulate. Clean up each step's inputs once they've been consumed.
+
+### 2.13 GCS Upload Pattern
 
 **RULE**: Python scripts do NOT upload to GCS directly. VM startup scripts handle all GCS uploads.
 
@@ -167,7 +208,42 @@ When changing a shared value, update `defaults.yaml` FIRST, then update all YAML
 | Python script | Write files to `/workspace_output/` |
 | VM startup script | `gsutil -m rsync -r "$LOCAL_OUTPUT_DIR/" "$GCS_PATH/"` |
 
-### 2.11 `cicd/` Submodule (CRITICAL)
+### 2.14 Run Contracts
+
+**RULE**: VM pipelines MUST write a `_run_contract.json` at the start and update it at the end.
+
+A run contract is a JSON file that records **what the pipeline expects to produce** before it runs, and **what it actually produced** after it finishes. This enables:
+- Downstream pipelines to verify upstream outputs exist before starting
+- Debugging failed runs (contract shows what was expected vs what happened)
+- Provenance tracking (inputs, config, and outputs in one file)
+
+**Structure:**
+```json
+{
+  "status": "COMPLETE",
+  "started_at": "2026-02-13T10:54:02Z",
+  "completed_at": "2026-02-13T13:07:11Z",
+  "configuration": { "area": "...", "year": "..." },
+  "inputs": { "features": "gs://...", "labels": "gs://..." },
+  "expected_outputs": [
+    { "file": "output.tif", "path": "gs://...", "type": "geotiff", "required": true }
+  ],
+  "verification": { "output_exists": "true", "exit_code": 0 }
+}
+```
+
+**Lifecycle:**
+1. **Start**: Write contract with `status: "RUNNING"`, config, inputs, and expected outputs. Upload to GCS immediately (so it's visible even if VM crashes).
+2. **End**: Update with `status: "COMPLETE"` or `"INCOMPLETE"`, add verification results, re-upload.
+
+**Key rules:**
+- Write the contract BEFORE any processing starts
+- Upload to GCS immediately after writing (crash visibility)
+- Expected outputs must list ALL files the pipeline should produce
+- Verification must check each expected output actually exists in GCS
+- Status is `COMPLETE` only if ALL required outputs exist
+
+### 2.15 `cicd/` Submodule (CRITICAL)
 
 Reusable CI/CD scripts live in **`darwin-cicd`**, consumed as a git submodule at `cicd/`.
 
