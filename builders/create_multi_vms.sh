@@ -226,6 +226,13 @@ for IDX in $(seq 1 "$VM_COUNT"); do
 
   echo "$ACTUAL_ZONE" > "/workspace/vm_zone_${IDX}.txt"
 
+  # Capture creation timestamp for absolute time range in logging URLs
+  VM_CREATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  VM_LOGS_END=$(date -u -d "+7 days" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+    || date -u -v+7d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+    || echo "")
+  echo "$VM_CREATED_AT" > "/workspace/vm_created_at_${IDX}.txt"
+
   # Get instance ID for Cloud Logging
   INSTANCE_ID=$(gcloud compute instances describe "$VM_NAME" --zone="$ACTUAL_ZONE" --format='get(id)' 2>/dev/null || echo "")
   echo "$INSTANCE_ID" > "/workspace/vm_instance_id_${IDX}.txt"
@@ -233,14 +240,18 @@ for IDX in $(seq 1 "$VM_COUNT"); do
 
   echo "VM created in zone: $ACTUAL_ZONE"
 
-  # Cloud Logging link
+  # Cloud Logging link (absolute time range so it works days later)
   PROJECT_ID_FOR_URL="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
   if [[ -n "$INSTANCE_ID" ]]; then
     LOGS_QUERY="resource.type%3D%22gce_instance%22%20resource.labels.zone%3D%22${ACTUAL_ZONE}%22%20resource.labels.instance_id%3D%22${INSTANCE_ID}%22%20severity%3E%3DDEFAULT"
   else
     LOGS_QUERY="resource.type%3D%22gce_instance%22%20%22${VM_NAME}%22%20severity%3E%3DDEFAULT"
   fi
-  echo "Logs: https://console.cloud.google.com/logs/query;query=${LOGS_QUERY};project=${PROJECT_ID_FOR_URL}"
+  TIME_RANGE=""
+  if [[ -n "$VM_LOGS_END" ]]; then
+    TIME_RANGE=";timeRange=${VM_CREATED_AT}%2F${VM_LOGS_END}"
+  fi
+  echo "Logs: https://console.cloud.google.com/logs/query;query=${LOGS_QUERY}${TIME_RANGE};project=${PROJECT_ID_FOR_URL}"
 
   # Collect VM names
   ALL_VM_NAMES="${ALL_VM_NAMES:+${ALL_VM_NAMES} }${VM_NAME}"
