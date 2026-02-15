@@ -255,6 +255,17 @@ write_run_contract() {
     return 1
   fi
 
+  local RUN_METADATA_JSON
+  RUN_METADATA_JSON=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'vm_name': sys.argv[1],
+    'cloudbuild_yaml': sys.argv[2],
+    'commit_sha': sys.argv[3],
+    'build_id': sys.argv[4]
+}))
+" "${VM_NAME:-}" "${CLOUDBUILD_YAML:-}" "${COMMIT_SHA:-}" "${BUILD_ID:-}")
+
   local CLI_ARGS=(
     init
     --contract-file "${CONTRACT_FILE}"
@@ -265,7 +276,7 @@ write_run_contract() {
     --config-json "${CONFIG_JSON}"
     --inputs-json "${INPUTS_JSON}"
     --expected-assets-json "${EXPECTED_OUTPUTS_JSON}"
-    --run-metadata-json "{\"vm_name\":\"${VM_NAME:-}\",\"cloudbuild_yaml\":\"${CLOUDBUILD_YAML:-}\",\"commit_sha\":\"${COMMIT_SHA:-}\",\"build_id\":\"${BUILD_ID:-}\"}"
+    --run-metadata-json "${RUN_METADATA_JSON}"
   )
   if [ "${EXPECTED_INPUTS_JSON}" != "[]" ]; then
     CLI_ARGS+=(--expected-inputs-json "${EXPECTED_INPUTS_JSON}")
