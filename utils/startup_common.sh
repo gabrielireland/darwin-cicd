@@ -217,8 +217,15 @@ run_contract_cli_path() {
 # ========================================
 # write_run_contract
 # ========================================
-# Write initial run contract JSON
-# Usage: write_run_contract "$CONTRACT_FILE" "$OUTPUT_GCS" "config_json_string"
+# Write initial run contract JSON.
+# IMPORTANT: All JSON arguments MUST be single-line strings.
+#   Multiline heredoc JSON breaks when passed as CLI arguments.
+#   Good: CONFIG_JSON="{\"key\":\"value\",\"key2\":\"value2\"}"
+#   Bad:  CONFIG_JSON=$(cat <<EOF
+#         { "key": "value" }
+#         EOF
+#         )
+# Usage: write_run_contract "$CONTRACT_FILE" "$OUTPUT_GCS" "config_json" "inputs_json" "expected_outputs_json"
 write_run_contract() {
   local CONTRACT_FILE="$1"
   local OUTPUT_GCS="$2"
