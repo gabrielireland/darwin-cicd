@@ -109,7 +109,38 @@ PYTHON_BOOL=$([ "$FIRST_YEAR" = "true" ] && echo "True" || echo "False")
 python3 -c "first = ${PYTHON_BOOL}"
 ```
 
-### 2.5 Common Errors
+### 2.5 Never Pass JSON Through Shell (CRITICAL)
+
+**NEVER** pass JSON through shell variables, function arguments, or CLI string args.
+Shell argument chains (`$()`, function params, `echo`, `cat`) introduce invisible characters
+that corrupt JSON — even when intermediate validation passes.
+
+**ALWAYS** use Python to write JSON directly to files, then pass **file paths** (not content) to consumers.
+
+```bash
+# WRONG — every one of these patterns corrupts JSON:
+CONFIG_JSON=$(python3 -c "import json; print(json.dumps({...}))" )
+my_function ... "${CONFIG_JSON}"           # function arg
+echo "${CONFIG_JSON}" > /tmp/config.json   # echo to file
+my_cli --config-json "${CONFIG_JSON}"      # CLI string arg
+
+# CORRECT — Python writes files, shell only passes paths:
+python3 -c "
+import json, pathlib
+pathlib.Path('/tmp/args/config.json').write_text(json.dumps({
+    'key1': 'value1',
+    'key2': 'value2'
+}))
+"
+my_cli --config-json-file /tmp/args/config.json
+```
+
+**Rule**: VMs have Python available. Use it for any structured data (JSON, YAML).
+Shell is for orchestration (calling tools, checking exit codes, moving files) — not for data construction or transport.
+
+`run_contract.py` enforces this: all JSON args are `--*-file` flags that read from disk via `_load_json_file()`.
+
+### 2.6 Common Errors
 
 | Error | Cause | Fix |
 |-------|-------|-----|
@@ -118,8 +149,9 @@ python3 -c "first = ${PYTHON_BOOL}"
 | `sed: can't read` | Pipe in value with \| delimiter | Use # delimiter |
 | `true: command not found` | Bash bool in Python | Convert with $([ ]) |
 | `tr '\n' not working` | Newline escape in YAML | Use `tr '\|' ' '` + loop |
+| `Extra data` in JSON | JSON passed through shell vars/args | Write JSON to file with Python, pass file path (see 2.5) |
 
-### 2.6 Parsing Pipe-Delimited Strings (CRITICAL)
+### 2.7 Parsing Pipe-Delimited Strings (CRITICAL)
 
 **NEVER use `tr '|' '\n'` in CloudBuild YAML** — `\n` is not interpreted as newline.
 
@@ -135,11 +167,11 @@ for MAPPING in $$(echo "${_MY_VAR}" | tr '|' ' '); do
 done
 ```
 
-### 2.7 Docker Logging
+### 2.8 Docker Logging
 
 **RULE**: All `docker run` commands MUST include `-e PYTHONUNBUFFERED=1`
 
-### 2.8 Default Variables
+### 2.9 Default Variables
 
 **Single source of truth**: `cloudbuild-builds/config/defaults.yaml`
 
@@ -152,13 +184,13 @@ source cicd/config/load_defaults.sh
 
 When changing a shared value, update `defaults.yaml` FIRST, then update all YAMLs to match.
 
-### 2.9 Resource Limits
+### 2.10 Resource Limits
 
 - Cloud Build: MAX 32GB memory
 - Files >20GB: MUST use VM
 - VM default: `n2-highmem-16` (128GB RAM)
 
-### 2.10 GCS Upload Pattern
+### 2.11 GCS Upload Pattern
 
 **RULE**: Python scripts do NOT upload to GCS directly. VM startup scripts handle all GCS uploads.
 
@@ -167,7 +199,7 @@ When changing a shared value, update `defaults.yaml` FIRST, then update all YAML
 | Python script | Write files to `/workspace_output/` |
 | VM startup script | `gsutil -m rsync -r "$LOCAL_OUTPUT_DIR/" "$GCS_PATH/"` |
 
-### 2.11 `cicd/` Submodule (CRITICAL)
+### 2.12 `cicd/` Submodule (CRITICAL)
 
 Reusable CI/CD scripts live in **`darwin-cicd`**, consumed as a git submodule at `cicd/`.
 
