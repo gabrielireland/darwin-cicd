@@ -829,9 +829,40 @@ def _cmd_init(args: argparse.Namespace) -> int:
         context=template_ctx,
     )
 
-    config_json = _load_json_file(Path(args.config_json_file).expanduser()) if args.config_json_file else {}
-    inputs_json = _load_json_file(Path(args.inputs_json_file).expanduser()) if args.inputs_json_file else {}
-    run_metadata_json = _load_json_file(Path(args.run_metadata_json_file).expanduser()) if args.run_metadata_json_file else None
+    # --init-json-file: single file with all init data (preferred)
+    # Keys: config, inputs, expected_assets, run_metadata
+    # Individual --*-json-file flags override keys from --init-json-file.
+    _init_bundle: Dict[str, Any] = {}
+    if getattr(args, "init_json_file", None):
+        _init_bundle = _load_json_file(Path(args.init_json_file).expanduser())
+        if not isinstance(_init_bundle, dict):
+            raise ValueError("--init-json-file must be a JSON object")
+        # Apply expected_assets/expected_inputs from bundle if not already set
+        if expected_assets_override is None and "expected_assets" in _init_bundle:
+            ea = _init_bundle["expected_assets"]
+            if not isinstance(ea, list):
+                raise ValueError("init-json-file 'expected_assets' must be a JSON array")
+            expected_assets_override = ea
+            # Re-normalize tasks/assets with the override
+            tasks, assets = _normalize_tasks_and_assets(
+                job_id=job_id, run_id=run_id, now_iso=now_iso,
+                job_def=job_def, expected_assets_override=expected_assets_override,
+                expected_inputs_override=expected_inputs_override, context=template_ctx,
+            )
+        if expected_inputs_override is None and "expected_inputs" in _init_bundle:
+            ei = _init_bundle["expected_inputs"]
+            if not isinstance(ei, list):
+                raise ValueError("init-json-file 'expected_inputs' must be a JSON array")
+            expected_inputs_override = ei
+            tasks, assets = _normalize_tasks_and_assets(
+                job_id=job_id, run_id=run_id, now_iso=now_iso,
+                job_def=job_def, expected_assets_override=expected_assets_override,
+                expected_inputs_override=expected_inputs_override, context=template_ctx,
+            )
+
+    config_json = _load_json_file(Path(args.config_json_file).expanduser()) if args.config_json_file else _init_bundle.get("config", {})
+    inputs_json = _load_json_file(Path(args.inputs_json_file).expanduser()) if args.inputs_json_file else _init_bundle.get("inputs", {})
+    run_metadata_json = _load_json_file(Path(args.run_metadata_json_file).expanduser()) if args.run_metadata_json_file else _init_bundle.get("run_metadata")
 
     contract = _new_contract(
         contract_file=contract_file,
@@ -1279,6 +1310,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--spec-file", help="JSON job expectations file")
     p_init.add_argument("--expected-assets-file", help="JSON array of expected output assets")
     p_init.add_argument("--expected-inputs-file", help="JSON array of expected input assets")
+    p_init.add_argument("--init-json-file", help="Single JSON file with keys: config, inputs, expected_assets, run_metadata (replaces individual --*-json-file flags)")
     p_init.add_argument("--config-json-file", help="File containing JSON object for configuration")
     p_init.add_argument("--inputs-json-file", help="File containing JSON object for input data")
     p_init.add_argument("--run-metadata-json-file", help="File containing JSON object merged into run.extra")

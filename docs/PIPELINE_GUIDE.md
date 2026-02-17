@@ -27,9 +27,9 @@ Create `cloudbuild-builds/vm/my_pipeline.sh`:
 # Available variables (replaced by sed before VM creation):
 #   Common (handled by prepare_vm_startup.sh):
 #     __REGION__, __IMAGE_URI__, __BUCKET__, __VM_NAME__, __VM_ZONE__,
-#     __BUILD_ID__, __GIT_COMMIT__, __CLOUDBUILD_YAML__, __PIPELINE_TITLE__
+#     __BUILD_ID__, __CLOUDBUILD_YAML__, __PIPELINE_TITLE__
 #
-#   Pipeline-specific (you add sed replacements in your YAML):
+#   Pipeline-specific (sed-replaced via vm_config_1.env):
 #     __MY_PARAM__, __MY_OTHER_PARAM__, etc.
 # ========================================
 
@@ -40,39 +40,109 @@ IMAGE_URI="__IMAGE_URI__"
 VM_NAME="__VM_NAME__"
 VM_ZONE="__VM_ZONE__"
 BUILD_ID="__BUILD_ID__"
-GIT_COMMIT="__GIT_COMMIT__"
+PIPELINE_TITLE="__PIPELINE_TITLE__"
 
 # Pipeline-specific placeholders
 MY_PARAM="__MY_PARAM__"
 MY_OTHER_PARAM="__MY_OTHER_PARAM__"
 
-# ---- Paths ----
-LOCAL_OUTPUT_DIR="/tmp/pipeline_output"
-OUTPUT_GCS="gs://${BUCKET}/Laboratory/MyOutput/${MY_PARAM}"
-mkdir -p "$LOCAL_OUTPUT_DIR"
+# ---- Derived paths ----
+OUTPUT_GCS="gs://${BUCKET}/my-output/${MY_PARAM}"
+WORK_DIR="/tmp/pipeline-${BUILD_ID}"
+LOG_FILE="/tmp/pipeline.log"
+CONTRACT_FILE="${WORK_DIR}/_run_contract.json"
 
-# ---- Docker Run ----
-# startup_common.sh already authenticated Docker and pulled the image.
-# Just run your container:
+# ---- Standard initialization ----
+vm_standard_init --idle-timeout=30
+vm_docker_auth "${REGION}"
+vm_docker_pull "${IMAGE_URI}"
+vm_setup_directories "${WORK_DIR}" "${WORK_DIR}/data/outputs"
+
+# ========== STAGE 1: DECLARE RUN CONTRACT ==========
+INIT_JSON="/tmp/contract_init.json"
+
+python3 -c "
+import json, sys, pathlib
+my_param, bucket, build_id = sys.argv[1:4]
+out = pathlib.Path(sys.argv[4])
+
+out.write_text(json.dumps({
+    'config': {
+        'my_param': my_param, 'target_bucket': bucket
+    },
+    'inputs': {
+        'source': 'description of input source'
+    },
+    'expected_assets': [
+        {'asset_id': 'outputs', 'kind': 'output', 'required': True,
+         'gcs_glob': f'gs://{bucket}/my-output/{my_param}/**/*.tif'}
+    ],
+    'run_metadata': {
+        'build_id': build_id
+    }
+}, indent=2))
+" "${MY_PARAM}" "${BUCKET}" "${BUILD_ID}" "${INIT_JSON}"
+
+RUN_CONTRACT_CLI="$(run_contract_cli_path)"
+
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "${PIPELINE_TITLE:-pipeline}" \
+  --run-id "${BUILD_ID:-}" \
+  --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
+  --output-location "${OUTPUT_GCS}" \
+  --init-json-file "${INIT_JSON}"
+
+# ========== STAGE 2: RUN THE PIPELINE ==========
+START_TIME=$(date +%s)
+
+set +e
 docker run --rm \
   -e PYTHONUNBUFFERED=1 \
-  -v "$LOCAL_OUTPUT_DIR":/workspace_output \
-  "$IMAGE_URI" \
+  -v "${WORK_DIR}":/workspace \
+  "${IMAGE_URI}" \
   python3 -m my_module.run \
-    --param "$MY_PARAM" \
-    --other "$MY_OTHER_PARAM" \
-    --output /workspace_output
+    --param "${MY_PARAM}" \
+    --other "${MY_OTHER_PARAM}" \
+    --output /workspace \
+  2>&1 | tee "${LOG_FILE}"
 
-# ---- Upload Results ----
-echo "Uploading results to GCS..."
-gsutil -m rsync -r "$LOCAL_OUTPUT_DIR/" "$OUTPUT_GCS/"
-echo "Upload complete: $OUTPUT_GCS"
+EXIT_CODE=${PIPESTATUS[0]}
+set -e
 
-# ---- Self-Cleanup ----
-# The VM has --instance-termination-action=DELETE and --max-run-duration set,
-# but explicit shutdown is good practice:
-echo "Pipeline complete. Shutting down VM..."
-sudo shutdown -h now
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# ---- Upload logs ----
+LOG_GCS_PATH="${OUTPUT_GCS}/logs/pipeline-${BUILD_ID}-$(date +%Y%m%d-%H%M%S).log"
+gsutil cp "${LOG_FILE}" "${LOG_GCS_PATH}"
+
+# ========== STAGE 3: FINALIZE & UPLOAD ==========
+if [ "${EXIT_CODE}" -eq 0 ]; then STATUS="COMPLETE"; else STATUS="FAILED"; fi
+
+python3 -c "
+import json, sys, pathlib
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'exit_code': int(sys.argv[1]),
+    'duration_seconds': int(sys.argv[2]),
+    'log_path': sys.argv[3]
+}))
+" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+
+"${RUN_CONTRACT_CLI}" finalize \
+  --contract-file "${CONTRACT_FILE}" \
+  --status "${STATUS}" \
+  --output-location "${OUTPUT_GCS}" \
+  --verification-json-file "${JSON_TMP}/verification.json"
+
+# ---- Upload run contract to output root ----
+if [ -f "${CONTRACT_FILE}" ]; then
+  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
+fi
+
+# ---- Final summary ----
+vm_final_summary "${STATUS}" "My Pipeline" "${OUTPUT_GCS}" \
+  "Duration=${DURATION}s" "ExitCode=${EXIT_CODE}"
 ```
 
 ## Step 2: Create the CloudBuild YAML
@@ -313,6 +383,9 @@ Before running, verify:
 - [ ] Every step that calls `cicd/` scripts exports `DEFAULTS_FILE`
 - [ ] `export_vm_defaults.sh` is called with `source`, not `bash`
 - [ ] All bash steps start with `set -euo pipefail`
+- [ ] VM startup script includes all 3 run contract stages (init → pipeline → finalize + upload)
+- [ ] Run contract upload goes to `${OUTPUT_GCS}/_run_contract.json` (output root)
+- [ ] Run contract init uses `--init-json-file` (single JSON file, never inline strings)
 
 ## Common Customizations
 
@@ -348,26 +421,69 @@ Set `_UPDATE_BASE: 'false'` (default). The base image is cached in Artifact Regi
 
 ### Run contract (expected vs actual outputs)
 
-Add a run-contract initialization before launching the VM, then finalize after outputs are written.
+Every pipeline MUST include a run contract. The contract tracks expected vs actual outputs
+and gets uploaded to the output root after finalize.
+
+Add 3 stages to your **VM startup script** (not CloudBuild YAML — the VM runs the contract):
 
 ```bash
-# Init (job_id -> expected outputs comes from run_contract_jobs.json)
-bash cicd/utils/run_contract.sh init \
-  --job-id "my-pipeline" \
-  --run-id "${BUILD_ID}" \
-  --spec-file "cloudbuild-builds/config/run_contract_jobs.json" \
-  --run-dir "/workspace/run_contract" \
-  --output-location "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
-  --var OUTPUT_DIR="/tmp/pipeline_output" \
-  --var OUTPUT_GCS="gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}"
+# ========== STAGE 1: DECLARE RUN CONTRACT ==========
+# Python writes one JSON file. Shell NEVER touches JSON content.
+INIT_JSON="/tmp/contract_init.json"
 
-# Finalize after processing/upload
-bash cicd/utils/run_contract.sh finalize \
-  --contract-file "/workspace/run_contract/_run_contract.json" \
-  --scan-local-dir "/tmp/pipeline_output" \
-  --scan-gcs-prefix "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
-  --upload-gcs-dir "gs://${_BUCKET}/Laboratory/MyOutput/${_MY_PARAM}" \
-  --strict
+python3 -c "
+import json, sys, pathlib
+out = pathlib.Path(sys.argv[1])
+out.write_text(json.dumps({
+    'config': {'job_config': 'my_job.yaml', 'image_uri': 'my-image:latest'},
+    'inputs': {'source': 'GCS input'},
+    'expected_assets': [
+        {'asset_id': 'outputs', 'kind': 'output', 'required': True,
+         'gcs_glob': 'gs://bucket/prefix/**/*.tif'}
+    ],
+    'run_metadata': {'build_id': 'abc123'}
+}, indent=2))
+" "${INIT_JSON}"
+
+RUN_CONTRACT_CLI="$(run_contract_cli_path)"
+
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "${PIPELINE_TITLE}" \
+  --run-id "${BUILD_ID}" \
+  --pipeline-title "${PIPELINE_TITLE}" \
+  --output-location "${OUTPUT_GCS}" \
+  --init-json-file "${INIT_JSON}"
+
+# ========== STAGE 2: RUN THE PIPELINE ==========
+docker run --rm ... | tee "${LOG_FILE}"
+EXIT_CODE=${PIPESTATUS[0]}
+
+# ========== STAGE 3: FINALIZE & UPLOAD ==========
+python3 -c "
+import json, sys, pathlib
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'exit_code': int(sys.argv[1]),
+    'duration_seconds': int(sys.argv[2]),
+    'log_path': sys.argv[3]
+}))
+" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+
+"${RUN_CONTRACT_CLI}" finalize \
+  --contract-file "${CONTRACT_FILE}" \
+  --status "${STATUS}" \
+  --output-location "${OUTPUT_GCS}" \
+  --verification-json-file "${JSON_TMP}/verification.json"
+
+# Upload run contract to output root (REQUIRED)
+if [ -f "${CONTRACT_FILE}" ]; then
+  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
+fi
 ```
+
+**Key rules:**
+- All JSON is written by Python to a single file — shell passes only the file **path**
+- Use `--init-json-file` (single file with `config`, `inputs`, `expected_assets`, `run_metadata` keys)
+- `_run_contract.json` lives at `${OUTPUT_GCS}/_run_contract.json` (output root, not logs subfolder)
 
 See `docs/RUN_CONTRACT_GUIDE.md` for schema and advanced usage (Cloud Run env generation, produced-asset updates, strict gates).

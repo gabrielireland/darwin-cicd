@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`darwin-cicd` now includes a reusable run-contract utility that tracks:
+`darwin-cicd` includes a reusable run-contract utility that tracks:
 
 - Which **inputs** are expected and whether they exist before processing
 - Which **outputs** are expected (from `job_id` + spec)
@@ -10,22 +10,39 @@
 - Which required outputs are missing/corrupt/unverified
 - Which unexpected outputs exist in scanned output paths
 
-This follows the same expected-vs-actual reporting logic used in `spatial_data_mining`, but in a generic form for any pipeline.
+This follows the same expected-vs-actual reporting logic in a generic form for any pipeline.
+
+## Critical Rule: Never Pass JSON Through Shell
+
+**All JSON arguments MUST be passed as files, never as inline strings.**
+
+Shell argument chains (`$()`, function params, `echo`, `cat`) introduce invisible characters
+that corrupt JSON — even when intermediate validation passes.
+
+**Standard pattern:**
+1. Python writes JSON to temp files
+2. `run_contract.py` reads files via `--*-file` flags
+3. Shell only passes file **paths** (never content)
 
 ## Files Written Per Run
 
-Given a run directory (default: `run_contracts/<job_id>/<run_id>/`), the tool writes:
+The tool writes:
 
-- `_run_contract.json`: full contract
-- `run_tasks.jsonl`: `run` / `task` / `asset` records
-- `run_summary.json`: compact status summary
+- `_run_contract.json`: full contract (uploaded to `${OUTPUT_GCS}/_run_contract.json` after finalize)
 
 ## CLI Entry Point
 
-Use:
+On VMs, `prepare_vm_startup.sh` embeds `run_contract.py` into the startup script.
+Resolve the CLI path with the helper function:
 
 ```bash
-bash cicd/utils/run_contract.sh <subcommand> ...
+RUN_CONTRACT_CLI="$(run_contract_cli_path)"
+```
+
+Then call directly:
+
+```bash
+"${RUN_CONTRACT_CLI}" <subcommand> [--flags...]
 ```
 
 Subcommands:
@@ -90,26 +107,65 @@ Supported asset location fields:
 
 ## 2) Initialize Contract
 
+Use Python to write a single JSON file, then pass its path to the CLI:
+
 ```bash
-bash cicd/utils/run_contract.sh init \
-  --job-id my-job-id \
-  --run-id "${BUILD_ID}" \
-  --spec-file cloudbuild-builds/config/run_contract_jobs.json \
-  --run-dir /tmp/run_contract \
-  --output-location "gs://my-bucket/my-output-prefix" \
-  --expected-inputs-json '[{"asset_id":"features","kind":"tensor","required":true,"uri":"gs://bucket/features.pt"}]' \
-  --expected-assets-json '[{"asset_id":"model","kind":"model","required":true,"local_path":"/tmp/out/model.pkl"}]' \
-  --var OUTPUT_DIR=/tmp/workspace_output \
-  --var OUTPUT_GCS=gs://my-bucket/my-output-prefix
+# ---- Python writes one JSON file (shell never touches JSON) ----
+INIT_JSON="/tmp/contract_init.json"
+
+python3 -c "
+import json, sys, pathlib
+
+job_config, output_prefix, image_uri, bucket, build_id = sys.argv[1:6]
+out = pathlib.Path(sys.argv[6])
+
+contract = {
+    'config': {
+        'job_config': job_config,
+        'output_prefix': output_prefix,
+        'image_uri': image_uri,
+        'target_bucket': bucket
+    },
+    'inputs': {
+        'source': 'description of input source'
+    },
+    'expected_assets': [
+        {'asset_id': 'cog_outputs', 'kind': 'output', 'required': True,
+         'gcs_glob': f'gs://{bucket}/{output_prefix}/**/*.tif'}
+    ],
+    'run_metadata': {
+        'vm_name': 'my-vm',
+        'build_id': build_id
+    }
+}
+
+out.write_text(json.dumps(contract, indent=2))
+" "${JOB_CONFIG}" "${OUTPUT_PREFIX}" "${IMAGE_URI}" "${BUCKET}" "${BUILD_ID}" "${INIT_JSON}"
+
+# ---- Call run_contract.py with single init file ----
+RUN_CONTRACT_CLI="$(run_contract_cli_path)"
+
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "${PIPELINE_TITLE:-pipeline}" \
+  --run-id "${BUILD_ID:-}" \
+  --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
+  --output-location "${OUTPUT_GCS}" \
+  --init-json-file "${INIT_JSON}"
 ```
 
-Input assets can be provided via:
+The `--init-json-file` accepts a single JSON object with these keys:
 
-- `--expected-inputs-json` (inline JSON array)
-- `--expected-inputs-file` (path to JSON file containing an array)
-- `expected_inputs` in the spec file task definition
+| Key | Content |
+|-----|---------|
+| `config` | Pipeline config (job, image, bucket, etc.) |
+| `inputs` | Input sources description |
+| `expected_assets` | Array of expected output assets |
+| `run_metadata` | VM name, build ID, commit SHA, etc. |
 
-The init summary now shows the input/output breakdown:
+Individual `--*-json-file` flags (`--config-json-file`, `--inputs-json-file`, etc.) still work and override keys from `--init-json-file`.
+
+The init summary shows the input/output breakdown:
 
 ```
 tasks=1 assets=3 (inputs=1 outputs=2)
@@ -155,18 +211,30 @@ bash cicd/utils/run_contract.sh record-produced \
 
 ## 5) Finalize (Expected vs Actual Audit)
 
+Write verification data via Python, then call finalize:
+
 ```bash
-bash cicd/utils/run_contract.sh finalize \
-  --contract-file /tmp/run_contract/_run_contract.json \
-  --scan-local-dir /tmp/workspace_output \
-  --scan-gcs-prefix gs://my-bucket/my-output-prefix \
-  --upload-gcs-dir gs://my-bucket/my-output-prefix \
-  --strict
+# ---- Python writes verification JSON ----
+python3 -c "
+import json, sys, pathlib
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'exit_code': int(sys.argv[1]),
+    'duration_seconds': int(sys.argv[2]),
+    'log_path': sys.argv[3]
+}))
+" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+
+# ---- Finalize ----
+"${RUN_CONTRACT_CLI}" finalize \
+  --contract-file "${CONTRACT_FILE}" \
+  --status "${STATUS}" \
+  --output-location "${OUTPUT_GCS}" \
+  --verification-json-file "${JSON_TMP}/verification.json"
 ```
 
 `--strict` exits with code `2` when required outputs are missing/corrupt/unverified.
 
-Finalize now reports input and output status separately:
+Finalize reports input and output status separately:
 
 ```
 required_missing=1 required_corrupt=0 required_unverified=0
@@ -195,31 +263,71 @@ Formats:
 - `set-env-vars`
 - `json`
 
-## Compatibility with Existing VM Helpers
+## 6) Upload Run Contract to GCS (REQUIRED)
 
-`utils/startup_common.sh` now tries to use this CLI in:
-
-- `write_run_contract` (6th parameter: `EXPECTED_INPUTS_JSON`)
-- `preflight_run_contract` (new)
-- `update_run_contract`
-
-If the CLI is not available in the runtime environment, it automatically falls back to the legacy `_run_contract.json` behavior.
-
-## Pipeline Lifecycle (New Standard)
+After finalize, upload `_run_contract.json` to the **output root** (not a logs subfolder):
 
 ```bash
-# 1. Init — declare inputs + outputs
-write_run_contract "$CONTRACT_FILE" "$OUTPUT_GCS" \
-  "$CONFIG_JSON" "$INPUTS_JSON" "$EXPECTED_OUTPUTS_JSON" "$EXPECTED_INPUTS_JSON"
+if [ -f "${CONTRACT_FILE}" ]; then
+  CONTRACT_GCS_PATH="${OUTPUT_GCS}/_run_contract.json"
+  gsutil cp "${CONTRACT_FILE}" "${CONTRACT_GCS_PATH}"
+  echo "Run contract: ${CONTRACT_GCS_PATH}"
+fi
+```
 
-# 2. Preflight — verify inputs exist
-preflight_run_contract "$CONTRACT_FILE" --strict
+**Rule**: The run contract MUST live at `${OUTPUT_GCS}/_run_contract.json` — the same root as the data it describes.
 
-# 3. Processing
-docker run ...
+## Pipeline Lifecycle (Standard for All Pipelines)
 
-# 4. Finalize — verify outputs exist
-update_run_contract "$CONTRACT_FILE" "$OUTPUT_GCS" "$STATUS" "$VERIFICATION_JSON"
+Every VM startup script MUST follow this 3-stage pattern:
+
+```bash
+# ========== STAGE 1: DECLARE RUN CONTRACT ==========
+# Python writes one JSON file. Shell never touches JSON content.
+INIT_JSON="/tmp/contract_init.json"
+
+python3 -c "
+import json, sys, pathlib
+# ... write single JSON with config, inputs, expected_assets, run_metadata
+" args... "${INIT_JSON}"
+
+RUN_CONTRACT_CLI="$(run_contract_cli_path)"
+
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "${PIPELINE_TITLE:-pipeline}" \
+  --run-id "${BUILD_ID:-}" \
+  --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
+  --output-location "${OUTPUT_GCS}" \
+  --init-json-file "${INIT_JSON}"
+
+# (Optional) Preflight — verify inputs exist
+# "${RUN_CONTRACT_CLI}" preflight --contract-file "${CONTRACT_FILE}" --strict
+
+# ========== STAGE 2: RUN THE PIPELINE ==========
+docker run --rm ... | tee "${LOG_FILE}"
+EXIT_CODE=${PIPESTATUS[0]}
+
+# ========== STAGE 3: FINALIZE & UPLOAD ==========
+python3 -c "
+import json, sys, pathlib
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'exit_code': int(sys.argv[1]),
+    'duration_seconds': int(sys.argv[2]),
+    'log_path': sys.argv[3]
+}))
+" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+
+"${RUN_CONTRACT_CLI}" finalize \
+  --contract-file "${CONTRACT_FILE}" \
+  --status "${STATUS}" \
+  --output-location "${OUTPUT_GCS}" \
+  --verification-json-file "${JSON_TMP}/verification.json"
+
+# Upload run contract to output root
+if [ -f "${CONTRACT_FILE}" ]; then
+  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
+fi
 ```
 
 ## Migration from preflight_check.sh
@@ -233,14 +341,27 @@ preflight_validate_gcs "gs://bucket/features.pt" "features file"
 preflight_validate_gcs "gs://bucket/labels.pt" "labels file"
 ```
 
-**After** (contract-integrated):
+**After** (contract-integrated, file-based):
 ```bash
-write_run_contract "$CONTRACT_FILE" "$OUTPUT_GCS" \
-  "$CONFIG_JSON" "$INPUTS_JSON" "$EXPECTED_OUTPUTS_JSON" \
-  '[{"asset_id":"features","kind":"tensor","required":true,"uri":"gs://bucket/features.pt"},
-    {"asset_id":"labels","kind":"tensor","required":true,"uri":"gs://bucket/labels.pt"}]'
+# Python writes expected inputs to a file
+python3 -c "
+import json, pathlib
+pathlib.Path('/tmp/contract_args/expected_inputs.json').write_text(json.dumps([
+    {'asset_id': 'features', 'kind': 'tensor', 'required': True, 'uri': 'gs://bucket/features.pt'},
+    {'asset_id': 'labels', 'kind': 'tensor', 'required': True, 'uri': 'gs://bucket/labels.pt'}
+]))
+"
 
-preflight_run_contract "$CONTRACT_FILE" --strict
+# Init with file-based args
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "my-pipeline" \
+  --run-id "${BUILD_ID}" \
+  --expected-assets-file "/tmp/contract_args/expected_inputs.json" \
+  ...
+
+# Preflight
+"${RUN_CONTRACT_CLI}" preflight --contract-file "${CONTRACT_FILE}" --strict
 ```
 
 The contract approach gives you structured tracking, per-asset status in the contract JSON, and a unified audit trail for both inputs and outputs.
