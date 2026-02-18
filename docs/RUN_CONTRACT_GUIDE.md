@@ -26,9 +26,10 @@ that corrupt JSON — even when intermediate validation passes.
 
 ## Files Written Per Run
 
-The tool writes:
+The tool writes a single `_run_contract.json`. By default (with `--contract-scope folder`), finalize uploads a **per-folder** contract to each GCS output folder, so every subfolder has its own `_run_contract.json` sitting next to the data it describes.
 
-- `_run_contract.json`: full contract (uploaded to `${OUTPUT_GCS}/_run_contract.json` after finalize)
+- Local: `${CONTRACT_FILE}` (full contract with all tasks/assets)
+- GCS: `{folder_uri}/_run_contract.json` per output folder (filtered to that folder's assets)
 
 ## CLI Entry Point
 
@@ -209,9 +210,9 @@ bash cicd/utils/run_contract.sh record-produced \
   --local-path /tmp/workspace_output/model.pkl
 ```
 
-## 5) Finalize (Expected vs Actual Audit)
+## 5) Finalize (Expected vs Actual Audit + GCS Upload)
 
-Write verification data via Python, then call finalize:
+Write verification data via Python, then call finalize. Finalize audits all assets, uploads per-folder contracts to GCS, and writes the final local contract.
 
 ```bash
 # ---- Python writes verification JSON ----
@@ -224,25 +225,36 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
 }))
 " "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
 
-# ---- Finalize ----
+# ---- Finalize with per-folder contracts ----
 "${RUN_CONTRACT_CLI}" finalize \
   --contract-file "${CONTRACT_FILE}" \
   --status "${STATUS}" \
   --output-location "${OUTPUT_GCS}" \
+  --contract-scope folder \
   --verification-json-file "${JSON_TMP}/verification.json"
 ```
+
+**`--contract-scope`** controls how contracts are uploaded to GCS:
+
+| Scope | Behavior |
+|-------|----------|
+| `folder` (default) | Groups assets by GCS folder, uploads a filtered `_run_contract.json` to each folder |
+| `run` | Uploads one `_run_contract.json` to the output root |
 
 `--strict` exits with code `2` when required outputs are missing/corrupt/unverified.
 
 Finalize reports input and output status separately:
 
 ```
-required_missing=1 required_corrupt=0 required_unverified=0
+  uploaded: gs://bucket/jaen/ndvi/_run_contract.json (2 assets)
+  uploaded: gs://bucket/jaen/logs/_run_contract.json (1 assets)
+run_contract finalize: /tmp/work/_run_contract.json
+required_missing=0 required_corrupt=0 required_unverified=0
 input_assets={'ok': 2}
-output_assets={'ok': 3, 'missing': 1}
+output_assets={'ok': 3}
 ```
 
-The verification object includes `input_asset_status_counts`, `output_asset_status_counts`, and `missing_required_input_ids`.
+The verification object includes `input_asset_status_counts`, `output_asset_status_counts`, `missing_required_input_ids`, and `folder_uploads`.
 
 ## Cloud Run Configuration Helper
 
@@ -263,19 +275,22 @@ Formats:
 - `set-env-vars`
 - `json`
 
-## 6) Upload Run Contract to GCS (REQUIRED)
+## 6) GCS Upload (Handled by Finalize)
 
-After finalize, upload `_run_contract.json` to the **output root** (not a logs subfolder):
+**No manual `gsutil cp` is needed.** Finalize handles all GCS uploads internally based on `--contract-scope`.
 
-```bash
-if [ -f "${CONTRACT_FILE}" ]; then
-  CONTRACT_GCS_PATH="${OUTPUT_GCS}/_run_contract.json"
-  gsutil cp "${CONTRACT_FILE}" "${CONTRACT_GCS_PATH}"
-  echo "Run contract: ${CONTRACT_GCS_PATH}"
-fi
+With `--contract-scope folder` (default), each output folder gets its own `_run_contract.json`:
+```
+gs://bucket/jaen/ndvi/_run_contract.json    (only ndvi assets)
+gs://bucket/jaen/logs/_run_contract.json    (only log assets)
 ```
 
-**Rule**: The run contract MUST live at `${OUTPUT_GCS}/_run_contract.json` — the same root as the data it describes.
+With `--contract-scope run`, one contract is uploaded to the output root:
+```
+gs://bucket/jaen/_run_contract.json         (all assets)
+```
+
+Upload results are stored in `verification.folder_uploads` on the local contract.
 
 ## Pipeline Lifecycle (Standard for All Pipelines)
 
@@ -308,7 +323,7 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
 docker run --rm ... | tee "${LOG_FILE}"
 EXIT_CODE=${PIPESTATUS[0]}
 
-# ========== STAGE 3: FINALIZE & UPLOAD ==========
+# ========== STAGE 3: FINALIZE ==========
 python3 -c "
 import json, sys, pathlib
 pathlib.Path(sys.argv[4]).write_text(json.dumps({
@@ -322,12 +337,9 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
   --contract-file "${CONTRACT_FILE}" \
   --status "${STATUS}" \
   --output-location "${OUTPUT_GCS}" \
+  --contract-scope folder \
   --verification-json-file "${JSON_TMP}/verification.json"
-
-# Upload run contract to output root
-if [ -f "${CONTRACT_FILE}" ]; then
-  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
-fi
+# Finalize uploads per-folder contracts to GCS automatically — no manual gsutil needed.
 ```
 
 ## Migration from preflight_check.sh

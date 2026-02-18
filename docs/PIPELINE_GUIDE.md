@@ -117,7 +117,7 @@ DURATION=$((END_TIME - START_TIME))
 LOG_GCS_PATH="${OUTPUT_GCS}/logs/pipeline-${BUILD_ID}-$(date +%Y%m%d-%H%M%S).log"
 gsutil cp "${LOG_FILE}" "${LOG_GCS_PATH}"
 
-# ========== STAGE 3: FINALIZE & UPLOAD ==========
+# ========== STAGE 3: FINALIZE ==========
 if [ "${EXIT_CODE}" -eq 0 ]; then STATUS="COMPLETE"; else STATUS="FAILED"; fi
 
 python3 -c "
@@ -133,12 +133,9 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
   --contract-file "${CONTRACT_FILE}" \
   --status "${STATUS}" \
   --output-location "${OUTPUT_GCS}" \
+  --contract-scope folder \
   --verification-json-file "${JSON_TMP}/verification.json"
-
-# ---- Upload run contract to output root ----
-if [ -f "${CONTRACT_FILE}" ]; then
-  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
-fi
+# Finalize uploads per-folder contracts to GCS automatically.
 
 # ---- Final summary ----
 vm_final_summary "${STATUS}" "My Pipeline" "${OUTPUT_GCS}" \
@@ -383,8 +380,8 @@ Before running, verify:
 - [ ] Every step that calls `cicd/` scripts exports `DEFAULTS_FILE`
 - [ ] `export_vm_defaults.sh` is called with `source`, not `bash`
 - [ ] All bash steps start with `set -euo pipefail`
-- [ ] VM startup script includes all 3 run contract stages (init → pipeline → finalize + upload)
-- [ ] Run contract upload goes to `${OUTPUT_GCS}/_run_contract.json` (output root)
+- [ ] VM startup script includes all 3 run contract stages (init → pipeline → finalize)
+- [ ] Finalize uses `--contract-scope folder` (per-folder contracts, no manual gsutil)
 - [ ] Run contract init uses `--init-json-file` (single JSON file, never inline strings)
 
 ## Common Customizations
@@ -419,10 +416,10 @@ sed -i "s#__PIPE_VALUE__#$${VALUE_WITH_PIPES}#g" /tmp/startup-script.sh
 
 Set `_UPDATE_BASE: 'false'` (default). The base image is cached in Artifact Registry and only rebuilt when `_UPDATE_BASE: 'true'`.
 
-### Run contract (expected vs actual outputs)
+### Run contract (REQUIRED)
 
-Every pipeline MUST include a run contract. The contract tracks expected vs actual outputs
-and gets uploaded to the output root after finalize.
+Every pipeline MUST include a run contract. The contract tracks expected vs actual outputs.
+Finalize uploads **per-folder** contracts to GCS automatically — no manual `gsutil cp` needed.
 
 Add 3 stages to your **VM startup script** (not CloudBuild YAML — the VM runs the contract):
 
@@ -459,7 +456,7 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
 docker run --rm ... | tee "${LOG_FILE}"
 EXIT_CODE=${PIPESTATUS[0]}
 
-# ========== STAGE 3: FINALIZE & UPLOAD ==========
+# ========== STAGE 3: FINALIZE ==========
 python3 -c "
 import json, sys, pathlib
 pathlib.Path(sys.argv[4]).write_text(json.dumps({
@@ -473,17 +470,15 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
   --contract-file "${CONTRACT_FILE}" \
   --status "${STATUS}" \
   --output-location "${OUTPUT_GCS}" \
+  --contract-scope folder \
   --verification-json-file "${JSON_TMP}/verification.json"
-
-# Upload run contract to output root (REQUIRED)
-if [ -f "${CONTRACT_FILE}" ]; then
-  gsutil cp "${CONTRACT_FILE}" "${OUTPUT_GCS}/_run_contract.json"
-fi
+# Finalize uploads per-folder contracts to GCS automatically.
 ```
 
 **Key rules:**
 - All JSON is written by Python to a single file — shell passes only the file **path**
 - Use `--init-json-file` (single file with `config`, `inputs`, `expected_assets`, `run_metadata` keys)
-- `_run_contract.json` lives at `${OUTPUT_GCS}/_run_contract.json` (output root, not logs subfolder)
+- Use `--contract-scope folder` so each output folder gets its own `_run_contract.json`
+- No manual `gsutil cp` of contract — finalize handles GCS uploads
 
 See `docs/RUN_CONTRACT_GUIDE.md` for schema and advanced usage (Cloud Run env generation, produced-asset updates, strict gates).

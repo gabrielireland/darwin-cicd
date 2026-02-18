@@ -220,6 +220,19 @@ bash cicd/builders/create_vm.sh                # 4. Create VM
 
 See `cicd/docs/PIPELINE_GUIDE.md` for the complete template.
 
+### 2.13 Run Contract (REQUIRED)
+
+Every pipeline MUST include a run contract (`_run_contract.json`). The contract tracks expected vs actual outputs with a 3-stage lifecycle: **init → pipeline → finalize**.
+
+**Rules:**
+- Shell NEVER touches JSON — Python writes JSON to files, shell passes file **paths**
+- Use `--init-json-file` for init (single file with `config`, `inputs`, `expected_assets`, `run_metadata` keys)
+- Use `--contract-scope folder` for finalize (each GCS output folder gets its own `_run_contract.json`)
+- No manual `gsutil cp` of contract — finalize handles all GCS uploads
+- `--verification-json-file` passes exit code, duration, and log path to finalize
+
+See `cicd/docs/RUN_CONTRACT_GUIDE.md` for full schema and examples.
+
 ---
 
 ## 3. DOCKER RULES

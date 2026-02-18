@@ -2,12 +2,8 @@
 """
 Generic run-contract utility for CI/CD pipelines.
 
-This tool is shell-friendly (invoked from bash) and writes reproducible JSON artifacts:
-- _run_contract.json (full contract)
-- run_tasks.jsonl   (run/task/asset records)
-- run_summary.json  (rollup counts)
-
-It is pipeline-agnostic and can be used from local shells, Cloud Build, VMs, and Cloud Run.
+Writes a single `_run_contract.json` per output folder (or per run).
+Pipeline-agnostic — works from local shells, Cloud Build, VMs, and Cloud Run.
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from string import Template
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Tuple
@@ -385,8 +382,6 @@ def _new_contract(
         "paths": {
             "run_dir": str(run_dir),
             "contract_json": str(contract_file),
-            "tasks_jsonl": str(run_dir / "run_tasks.jsonl"),
-            "summary_json": str(run_dir / "run_summary.json"),
             "spec_file": str(spec_file) if spec_file else None,
         },
     }
@@ -425,86 +420,11 @@ def _asset_index(contract: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {str(asset.get("asset_id")): asset for asset in contract.get("assets", [])}
 
 
-def _write_jsonl_and_summary(contract: Mapping[str, Any]) -> None:
-    paths = contract.get("paths", {})
-    tasks_jsonl = Path(str(paths.get("tasks_jsonl") or "run_tasks.jsonl"))
-    summary_json = Path(str(paths.get("summary_json") or "run_summary.json"))
-
-    run_meta = dict(contract.get("run", {}))
-    run_id = str(run_meta.get("run_id") or "run")
-
-    records: List[Dict[str, Any]] = []
-    records.append(
-        {
-            "id": f"run/{run_id}",
-            "record_type": "run",
-            "schema_version": int(contract.get("schema_version") or SCHEMA_VERSION),
-            **run_meta,
-        }
-    )
-
-    for task in sorted(contract.get("tasks", []), key=lambda rec: str(rec.get("task_id") or "")):
-        rec = dict(task)
-        rec["id"] = f"task/{rec.get('task_id')}"
-        rec["record_type"] = "task"
-        rec["schema_version"] = int(contract.get("schema_version") or SCHEMA_VERSION)
-        records.append(rec)
-
-    for asset in sorted(contract.get("assets", []), key=lambda rec: str(rec.get("asset_id") or "")):
-        rec = dict(asset)
-        rec["id"] = f"asset/{rec.get('asset_id')}"
-        rec["record_type"] = "asset"
-        rec["schema_version"] = int(contract.get("schema_version") or SCHEMA_VERSION)
-        records.append(rec)
-
-    records.sort(key=lambda rec: str(rec.get("id") or ""))
-    lines = [json.dumps(rec, sort_keys=True) for rec in records]
-    _atomic_write_text(tasks_jsonl, "\n".join(lines) + ("\n" if lines else ""))
-
-    task_status_counts: Dict[str, int] = {}
-    for task in contract.get("tasks", []):
-        status = str(task.get("status") or "unknown")
-        task_status_counts[status] = task_status_counts.get(status, 0) + 1
-
-    asset_status_counts: Dict[str, int] = {}
-    input_asset_status_counts: Dict[str, int] = {}
-    output_asset_status_counts: Dict[str, int] = {}
-    for asset in contract.get("assets", []):
-        status = str(asset.get("status") or "unknown")
-        asset_status_counts[status] = asset_status_counts.get(status, 0) + 1
-        role = str(asset.get("role") or "output")
-        if role == "input":
-            input_asset_status_counts[status] = input_asset_status_counts.get(status, 0) + 1
-        else:
-            output_asset_status_counts[status] = output_asset_status_counts.get(status, 0) + 1
-
-    summary = {
-        "schema_version": int(contract.get("schema_version") or SCHEMA_VERSION),
-        "run_id": run_meta.get("run_id"),
-        "job_id": run_meta.get("job_id"),
-        "status": run_meta.get("status"),
-        "started_at": run_meta.get("started_at"),
-        "finished_at": run_meta.get("completed_at"),
-        "task_status_counts": task_status_counts,
-        "asset_status_counts": asset_status_counts,
-        "input_asset_status_counts": input_asset_status_counts,
-        "output_asset_status_counts": output_asset_status_counts,
-        "verification": contract.get("verification", {}),
-        "paths": {
-            "contract_json": str(paths.get("contract_json") or "_run_contract.json"),
-            "tasks_jsonl": str(tasks_jsonl),
-            "summary_json": str(summary_json),
-        },
-    }
-
-    _atomic_write_json(summary_json, summary)
-
-
-def _write_contract_bundle(contract: Mapping[str, Any]) -> None:
+def _write_contract(contract: Mapping[str, Any]) -> None:
+    """Write _run_contract.json to disk."""
     paths = contract.get("paths", {})
     contract_json = Path(str(paths.get("contract_json") or "_run_contract.json"))
     _atomic_write_json(contract_json, contract)
-    _write_jsonl_and_summary(contract)
 
 
 def _ensure_task(contract: MutableMapping[str, Any], task_id: str) -> Dict[str, Any]:
@@ -729,30 +649,100 @@ def _scan_gcs_files(prefixes: Iterable[str]) -> List[str]:
     return sorted(out)
 
 
-def _upload_bundle_to_gcs(contract: Mapping[str, Any], gcs_run_dir: str) -> Tuple[bool, str | None]:
-    if not gcs_run_dir.startswith("gs://"):
-        return (False, "gcs_run_dir must start with gs://")
+def _upload_contract_to_gcs(local_path: Path, gcs_dest: str) -> Tuple[bool, str | None]:
+    """Upload a single _run_contract.json to a GCS path."""
+    if not gcs_dest.startswith("gs://"):
+        return (False, "gcs_dest must start with gs://")
     if not _command_exists("gsutil"):
         return (False, "gsutil not available")
-
-    paths = contract.get("paths", {})
-    local_contract = Path(str(paths.get("contract_json")))
-    local_tasks = Path(str(paths.get("tasks_jsonl")))
-    local_summary = Path(str(paths.get("summary_json")))
-
-    uploads = [
-        (local_contract, gcs_run_dir.rstrip("/") + "/_run_contract.json"),
-        (local_tasks, gcs_run_dir.rstrip("/") + "/run_tasks.jsonl"),
-        (local_summary, gcs_run_dir.rstrip("/") + "/run_summary.json"),
-    ]
-
-    for local_path, remote_path in uploads:
-        proc = subprocess.run(["gsutil", "cp", str(local_path), remote_path], capture_output=True, text=True)
-        if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip().replace("\n", " ")
-            return (False, f"failed upload to {remote_path}: {stderr or proc.returncode}")
-
+    proc = subprocess.run(
+        ["gsutil", "cp", str(local_path), gcs_dest],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip().replace("\n", " ")
+        return (False, f"failed upload to {gcs_dest}: {stderr or proc.returncode}")
     return (True, None)
+
+
+def _gcs_folder(asset: Mapping[str, Any]) -> str | None:
+    """Extract the GCS folder from an asset's uri or gcs_glob. Returns None if no GCS location."""
+    uri = asset.get("uri")
+    if uri and str(uri).startswith("gs://"):
+        normalized = _normalize_gs_uri(str(uri))
+        idx = normalized.rfind("/")
+        return normalized[:idx] if idx > len("gs://") else None
+
+    gcs_glob = asset.get("gcs_glob")
+    if gcs_glob and str(gcs_glob).startswith("gs://"):
+        normalized = _normalize_gs_uri(str(gcs_glob))
+        parts = normalized.split("/")
+        folder_parts: list[str] = []
+        for part in parts:
+            if any(ch in part for ch in ["*", "?", "[", "]"]):
+                break
+            folder_parts.append(part)
+        if len(folder_parts) > 2:
+            return "/".join(folder_parts).rstrip("/")
+
+    return None
+
+
+def _group_assets_by_folder(assets: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Group assets by their GCS folder. Assets without a GCS location are excluded."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for asset in assets:
+        folder = _gcs_folder(asset)
+        if folder is not None:
+            groups.setdefault(folder, []).append(asset)
+    return groups
+
+
+def _build_folder_contract(
+    full_contract: Mapping[str, Any],
+    folder_uri: str,
+    folder_assets: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build a filtered contract scoped to a single GCS folder."""
+    folder_asset_ids = {str(a.get("asset_id") or "") for a in folder_assets}
+    relevant_task_ids = {str(a.get("task_id") or "") for a in folder_assets}
+
+    filtered_tasks: List[Dict[str, Any]] = []
+    for task in full_contract.get("tasks", []):
+        if str(task.get("task_id") or "") not in relevant_task_ids:
+            continue
+        task_copy = dict(task)
+        task_copy["asset_ids"] = sorted(
+            aid for aid in (task.get("asset_ids") or []) if str(aid) in folder_asset_ids
+        )
+        filtered_tasks.append(task_copy)
+
+    asset_status_counts: Dict[str, int] = {}
+    for asset in folder_assets:
+        st = str(asset.get("status") or "unknown")
+        asset_status_counts[st] = asset_status_counts.get(st, 0) + 1
+
+    task_status_counts: Dict[str, int] = {}
+    for task in filtered_tasks:
+        st = str(task.get("status") or "unknown")
+        task_status_counts[st] = task_status_counts.get(st, 0) + 1
+
+    return {
+        "schema_version": full_contract.get("schema_version", SCHEMA_VERSION),
+        "run": dict(full_contract.get("run", {})),
+        "configuration": dict(full_contract.get("configuration", {})),
+        "input_data": dict(full_contract.get("input_data", {})),
+        "tasks": filtered_tasks,
+        "assets": list(folder_assets),
+        "verification": {
+            "finished_at": full_contract.get("verification", {}).get("finished_at"),
+            "asset_status_counts": asset_status_counts,
+            "task_status_counts": task_status_counts,
+            "scope": "folder",
+            "folder_uri": folder_uri,
+        },
+        "paths": {"scope": "folder", "folder_uri": folder_uri},
+    }
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -880,7 +870,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         spec_file=spec_file,
     )
 
-    _write_contract_bundle(contract)
+    _write_contract(contract)
 
     input_count = sum(1 for a in assets if a.get("role") == "input")
     output_count = sum(1 for a in assets if a.get("role") == "output")
@@ -933,7 +923,7 @@ def _cmd_record_produced(args: argparse.Namespace) -> int:
         task_asset_ids.append(asset_id)
     task["asset_ids"] = sorted(set(task_asset_ids))
 
-    _write_contract_bundle(contract)
+    _write_contract(contract)
     print(f"run_contract record-produced: task={task_id} asset={asset_id}")
     return 0
 
@@ -949,7 +939,7 @@ def _cmd_mark_task(args: argparse.Namespace, *, status: str) -> int:
             raise ValueError("--error-json-file must be a JSON object")
 
     _set_task_status(contract, task_id=str(args.task_id), status=status, error=error)
-    _write_contract_bundle(contract)
+    _write_contract(contract)
     print(f"run_contract mark-task-{status}: task={args.task_id}")
     return 0
 
@@ -1006,10 +996,12 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         "missing_optional_count": len(missing_optional),
     }
 
-    _write_contract_bundle(contract)
+    _write_contract(contract)
 
     if args.upload_gcs_dir:
-        ok_upload, err = _upload_bundle_to_gcs(contract, args.upload_gcs_dir)
+        contract_path = Path(str(contract.get("paths", {}).get("contract_json") or contract_file))
+        gcs_dest = args.upload_gcs_dir.rstrip("/") + "/_run_contract.json"
+        ok_upload, err = _upload_contract_to_gcs(contract_path, gcs_dest)
         if not ok_upload:
             print(f"WARNING: GCS upload failed: {err}", file=sys.stderr)
 
@@ -1218,17 +1210,72 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
         run_meta["output_location"] = args.output_location
 
     contract["verification"] = verification
+    _write_contract(contract)
 
-    # Optional persist to GCS (independent from output upload paths).
-    if args.upload_gcs_dir:
-        ok, err = _upload_bundle_to_gcs(contract, args.upload_gcs_dir)
-        verification["report_upload"] = {
-            "gcs_run_dir": args.upload_gcs_dir,
+    # ---- Upload contracts to GCS ----
+    scope = str(getattr(args, "contract_scope", "folder") or "folder").strip().lower()
+    output_location = str(args.output_location or contract.get("run", {}).get("output_location") or "").strip()
+    contract_local = Path(str(contract.get("paths", {}).get("contract_json") or contract_file))
+
+    folder_uploads: List[Dict[str, Any]] = []
+
+    if scope == "folder" and output_location.startswith("gs://"):
+        # Per-folder: group assets by GCS folder, build filtered contract per folder, upload each.
+        folder_groups = _group_assets_by_folder(assets)
+        if folder_groups:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="run_contract_folders_"))
+            for folder_uri, folder_assets in sorted(folder_groups.items()):
+                folder_contract = _build_folder_contract(contract, folder_uri, folder_assets)
+                folder_file = tmp_dir / hashlib.sha1(folder_uri.encode()).hexdigest()[:12] / "_run_contract.json"
+                _atomic_write_json(folder_file, folder_contract)
+                gcs_dest = folder_uri.rstrip("/") + "/_run_contract.json"
+                ok, err = _upload_contract_to_gcs(folder_file, gcs_dest)
+                folder_uploads.append({
+                    "folder_uri": folder_uri,
+                    "gcs_dest": gcs_dest,
+                    "asset_count": len(folder_assets),
+                    "success": bool(ok),
+                    "error": err,
+                })
+                if ok:
+                    print(f"  uploaded: {gcs_dest} ({len(folder_assets)} assets)")
+                else:
+                    print(f"  FAILED:   {gcs_dest}: {err}", file=sys.stderr)
+        else:
+            # No GCS assets found — fallback to single contract at output root.
+            gcs_dest = output_location.rstrip("/") + "/_run_contract.json"
+            ok, err = _upload_contract_to_gcs(contract_local, gcs_dest)
+            folder_uploads.append({
+                "folder_uri": output_location,
+                "gcs_dest": gcs_dest,
+                "asset_count": len(assets),
+                "success": bool(ok),
+                "error": err,
+            })
+            if ok:
+                print(f"  uploaded: {gcs_dest}")
+            else:
+                print(f"  FAILED:   {gcs_dest}: {err}", file=sys.stderr)
+    elif scope == "run" and output_location.startswith("gs://"):
+        # Single contract at output root.
+        gcs_dest = output_location.rstrip("/") + "/_run_contract.json"
+        ok, err = _upload_contract_to_gcs(contract_local, gcs_dest)
+        folder_uploads.append({
+            "folder_uri": output_location,
+            "gcs_dest": gcs_dest,
+            "asset_count": len(assets),
             "success": bool(ok),
             "error": err,
-        }
+        })
+        if ok:
+            print(f"  uploaded: {gcs_dest}")
+        else:
+            print(f"  FAILED:   {gcs_dest}: {err}", file=sys.stderr)
 
-    _write_contract_bundle(contract)
+    if folder_uploads:
+        verification["folder_uploads"] = folder_uploads
+        contract["verification"] = verification
+        _write_contract(contract)
 
     print(f"run_contract finalize: {contract_file}")
     print(
@@ -1321,7 +1368,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pre = sub.add_parser("preflight", help="Verify all input assets exist before processing")
     p_pre.add_argument("--contract-file", required=True, help="Path to _run_contract.json")
     p_pre.add_argument("--strict", action="store_true", help="Exit 2 if any required inputs are missing")
-    p_pre.add_argument("--upload-gcs-dir", help="Upload contract bundle to gs:// bucket path")
+    p_pre.add_argument("--upload-gcs-dir", help="Upload contract to gs:// path after preflight")
     p_pre.set_defaults(func=_cmd_preflight)
 
     p_prod = sub.add_parser("record-produced", help="Upsert a produced asset")
@@ -1363,7 +1410,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_finalize.add_argument("--audit-corruption", help="true|false (default: true)")
     p_finalize.add_argument("--scan-local-dir", action="append", help="Directory to scan for actual outputs")
     p_finalize.add_argument("--scan-gcs-prefix", action="append", help="GCS prefix to scan for actual outputs")
-    p_finalize.add_argument("--upload-gcs-dir", help="Upload contract/jsonl/summary to gs:// bucket path")
+    p_finalize.add_argument("--contract-scope", choices=["run", "folder"], default="folder",
+                            help="Upload scope: 'folder' writes per-folder contracts (default), 'run' writes one at output root")
     p_finalize.add_argument("--strict", action="store_true", help="Exit 2 if required outputs are missing/corrupt/unverified")
     p_finalize.set_defaults(func=_cmd_finalize)
 
