@@ -222,14 +222,15 @@ See `cicd/docs/PIPELINE_GUIDE.md` for the complete template.
 
 ### 2.13 Run Contract (REQUIRED)
 
-Every pipeline MUST include a run contract (`_run_contract.json`). The contract tracks expected vs actual outputs with a 3-stage lifecycle: **init → pipeline → finalize**.
+Every pipeline MUST include a run contract (`_run_contract.json`). The contract tracks expected vs actual **data outputs** with a 3-stage lifecycle: **init → pipeline → finalize**.
 
 **Rules:**
+- `expected_assets` tracks **data outputs only** — no logs, no metadata files
 - Shell NEVER touches JSON — Python writes JSON to files, shell passes file **paths**
 - Use `--init-json-file` for init (single file with `config`, `inputs`, `expected_assets`, `run_metadata` keys)
 - Use `--contract-scope folder` for finalize (each GCS output folder gets its own `_run_contract.json`)
-- No manual `gsutil cp` of contract — finalize handles all GCS uploads
-- `--verification-json-file` passes exit code, duration, and log path to finalize
+- No manual `gsutil cp` — finalize handles all GCS uploads
+- No log uploads to GCS — pipeline logs stay on the VM (Cloud Logging captures them)
 
 See `cicd/docs/RUN_CONTRACT_GUIDE.md` for full schema and examples.
 

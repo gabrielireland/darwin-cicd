@@ -218,12 +218,11 @@ Write verification data via Python, then call finalize. Finalize audits all asse
 # ---- Python writes verification JSON ----
 python3 -c "
 import json, sys, pathlib
-pathlib.Path(sys.argv[4]).write_text(json.dumps({
+pathlib.Path(sys.argv[3]).write_text(json.dumps({
     'exit_code': int(sys.argv[1]),
-    'duration_seconds': int(sys.argv[2]),
-    'log_path': sys.argv[3]
+    'duration_seconds': int(sys.argv[2])
 }))
-" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+" "${EXIT_CODE}" "${DURATION}" "${JSON_TMP}/verification.json"
 
 # ---- Finalize with per-folder contracts ----
 "${RUN_CONTRACT_CLI}" finalize \
@@ -247,11 +246,9 @@ Finalize reports input and output status separately:
 
 ```
   uploaded: gs://bucket/jaen/ndvi/_run_contract.json (2 assets)
-  uploaded: gs://bucket/jaen/logs/_run_contract.json (1 assets)
 run_contract finalize: /tmp/work/_run_contract.json
 required_missing=0 required_corrupt=0 required_unverified=0
-input_assets={'ok': 2}
-output_assets={'ok': 3}
+output_assets={'ok': 2}
 ```
 
 The verification object includes `input_asset_status_counts`, `output_asset_status_counts`, `missing_required_input_ids`, and `folder_uploads`.
@@ -282,7 +279,6 @@ Formats:
 With `--contract-scope folder` (default), each output folder gets its own `_run_contract.json`:
 ```
 gs://bucket/jaen/ndvi/_run_contract.json    (only ndvi assets)
-gs://bucket/jaen/logs/_run_contract.json    (only log assets)
 ```
 
 With `--contract-scope run`, one contract is uploaded to the output root:
@@ -320,18 +316,19 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
 # "${RUN_CONTRACT_CLI}" preflight --contract-file "${CONTRACT_FILE}" --strict
 
 # ========== STAGE 2: RUN THE PIPELINE ==========
-docker run --rm ... | tee "${LOG_FILE}"
+docker run --rm ... 2>&1 | tee "${LOG_FILE}"
 EXIT_CODE=${PIPESTATUS[0]}
 
 # ========== STAGE 3: FINALIZE ==========
+if [ "${EXIT_CODE}" -eq 0 ]; then STATUS="COMPLETE"; else STATUS="FAILED"; fi
+
 python3 -c "
 import json, sys, pathlib
-pathlib.Path(sys.argv[4]).write_text(json.dumps({
+pathlib.Path(sys.argv[3]).write_text(json.dumps({
     'exit_code': int(sys.argv[1]),
-    'duration_seconds': int(sys.argv[2]),
-    'log_path': sys.argv[3]
+    'duration_seconds': int(sys.argv[2])
 }))
-" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+" "${EXIT_CODE}" "${DURATION}" "${JSON_TMP}/verification.json"
 
 "${RUN_CONTRACT_CLI}" finalize \
   --contract-file "${CONTRACT_FILE}" \
@@ -339,7 +336,7 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
   --output-location "${OUTPUT_GCS}" \
   --contract-scope folder \
   --verification-json-file "${JSON_TMP}/verification.json"
-# Finalize uploads per-folder contracts to GCS automatically — no manual gsutil needed.
+# Finalize uploads per-folder contracts to GCS automatically.
 ```
 
 ## Migration from preflight_check.sh

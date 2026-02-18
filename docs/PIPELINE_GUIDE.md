@@ -113,21 +113,16 @@ set -e
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# ---- Upload logs ----
-LOG_GCS_PATH="${OUTPUT_GCS}/logs/pipeline-${BUILD_ID}-$(date +%Y%m%d-%H%M%S).log"
-gsutil cp "${LOG_FILE}" "${LOG_GCS_PATH}"
-
 # ========== STAGE 3: FINALIZE ==========
 if [ "${EXIT_CODE}" -eq 0 ]; then STATUS="COMPLETE"; else STATUS="FAILED"; fi
 
 python3 -c "
 import json, sys, pathlib
-pathlib.Path(sys.argv[4]).write_text(json.dumps({
+pathlib.Path(sys.argv[3]).write_text(json.dumps({
     'exit_code': int(sys.argv[1]),
-    'duration_seconds': int(sys.argv[2]),
-    'log_path': sys.argv[3]
+    'duration_seconds': int(sys.argv[2])
 }))
-" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+" "${EXIT_CODE}" "${DURATION}" "${JSON_TMP}/verification.json"
 
 "${RUN_CONTRACT_CLI}" finalize \
   --contract-file "${CONTRACT_FILE}" \
@@ -457,14 +452,15 @@ docker run --rm ... | tee "${LOG_FILE}"
 EXIT_CODE=${PIPESTATUS[0]}
 
 # ========== STAGE 3: FINALIZE ==========
+if [ "${EXIT_CODE}" -eq 0 ]; then STATUS="COMPLETE"; else STATUS="FAILED"; fi
+
 python3 -c "
 import json, sys, pathlib
-pathlib.Path(sys.argv[4]).write_text(json.dumps({
+pathlib.Path(sys.argv[3]).write_text(json.dumps({
     'exit_code': int(sys.argv[1]),
-    'duration_seconds': int(sys.argv[2]),
-    'log_path': sys.argv[3]
+    'duration_seconds': int(sys.argv[2])
 }))
-" "${EXIT_CODE}" "${DURATION}" "${LOG_GCS_PATH}" "${JSON_TMP}/verification.json"
+" "${EXIT_CODE}" "${DURATION}" "${JSON_TMP}/verification.json"
 
 "${RUN_CONTRACT_CLI}" finalize \
   --contract-file "${CONTRACT_FILE}" \
@@ -476,9 +472,11 @@ pathlib.Path(sys.argv[4]).write_text(json.dumps({
 ```
 
 **Key rules:**
+- `expected_assets` tracks **data outputs only** — no logs, no metadata files
 - All JSON is written by Python to a single file — shell passes only the file **path**
 - Use `--init-json-file` (single file with `config`, `inputs`, `expected_assets`, `run_metadata` keys)
 - Use `--contract-scope folder` so each output folder gets its own `_run_contract.json`
-- No manual `gsutil cp` of contract — finalize handles GCS uploads
+- No manual `gsutil cp` — finalize handles GCS uploads
+- No log uploads to GCS — pipeline logs stay on the VM (Cloud Logging captures them)
 
 See `docs/RUN_CONTRACT_GUIDE.md` for schema and advanced usage (Cloud Run env generation, produced-asset updates, strict gates).
