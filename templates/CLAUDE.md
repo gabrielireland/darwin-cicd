@@ -220,7 +220,7 @@ source cicd/builders/export_vm_defaults.sh     # 3. Export VM defaults (MUST sou
 bash cicd/builders/create_vm.sh                # 4. Create VM
 ```
 
-See `cicd/docs/PIPELINE_GUIDE.md` for the complete template.
+See `cicd/docs/STANDARD_PROJECT_TEMPLATE.md` for the complete template.
 
 ### 2.13 Run Contract (REQUIRED)
 

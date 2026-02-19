@@ -1,6 +1,6 @@
-# Creating a New CloudBuild VM Pipeline
+# Standard Project Template
 
-This guide walks through creating a complete pipeline: CloudBuild YAML + VM startup script.
+Complete template for creating a CloudBuild VM pipeline: CloudBuild YAML + VM startup script + Dockerfiles.
 
 ## Architecture
 

@@ -3,11 +3,176 @@
 Shared CI/CD scripts for CloudBuild VM pipelines. Consumed as a **git submodule** at `cicd/` — your project pins a specific version; CloudBuild clones it automatically via `init-submodules`.
 
 **Get started**: [docs/SETUP.md](docs/SETUP.md) — add submodule, copy templates, configure defaults
-**Create a pipeline**: [docs/PIPELINE_GUIDE.md](docs/PIPELINE_GUIDE.md) — full YAML + VM script template with checklist
+**Create a pipeline**: [docs/STANDARD_PROJECT_TEMPLATE.md](docs/STANDARD_PROJECT_TEMPLATE.md) — full YAML + VM script template with checklist
 **Run contracts**: [docs/RUN_CONTRACT_GUIDE.md](docs/RUN_CONTRACT_GUIDE.md) — expected vs actual output audit (local/VM/Cloud Run)
 **Update**: `cd cicd && git pull origin main && cd .. && git add cicd && git commit -m "update cicd"`
 
-**Must-copy templates** (in [templates/](templates/)):
+---
+
+## Why this exists
+
+Every team at Darwin builds data pipelines. Without a shared framework, each team reinvents the same infrastructure: Docker builds, VM orchestration, GCS uploads, output verification, self-deleting VMs. The result is N slightly-different implementations that all do the same thing, each with its own bugs.
+
+`darwin-cicd` solves this by splitting every pipeline into two halves:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      THE BIG IDEA                               │
+│                                                                 │
+│   Your project = WHAT to process (application logic)            │
+│   darwin-cicd  = HOW to run it  (infrastructure)                │
+│                                                                 │
+│   ┌─────────────────────┐    ┌─────────────────────┐            │
+│   │   YOUR PROJECT      │    │   cicd/ SUBMODULE    │            │
+│   │                     │    │                      │            │
+│   │  CloudBuild YAML    │    │  Builder scripts     │            │
+│   │  Dockerfiles        │    │  VM orchestration    │            │
+│   │  VM startup script  │    │  Run contracts       │            │
+│   │  Job configs        │    │  Config loading      │            │
+│   │  Application code   │    │  Preflight checks    │            │
+│   │                     │    │                      │            │
+│   │  "Process Jaen      │    │  "Build Docker,      │            │
+│   │   NDVI for 2024"    │    │   create VM, track   │            │
+│   │                     │    │   outputs, cleanup"   │            │
+│   └─────────────────────┘    └──────────────────────┘            │
+│                                                                 │
+│   You change YOUR side.  cicd/ stays identical across repos.    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### What each side owns
+
+```
+YOUR PROJECT (changes per repo)          cicd/ SUBMODULE (shared, identical)
+──────────────────────────────           ────────────────────────────────────
+cloudbuild-builds/                       cicd/
+├── config/defaults.yaml    ← project   ├── config/load_defaults.sh
+├── docker/                              ├── builders/
+│   ├── Dockerfile.base     ← deps      │   ├── build_base_image_step.sh
+│   └── Dockerfile          ← code      │   ├── build_code_image_step.sh
+└── vm/                                  │   ├── prepare_vm_startup.sh
+    └── my_pipeline.sh      ← logic     │   ├── create_multi_vms.sh
+                                         │   └── print_logging_link.sh
+my-pipeline.yaml            ← trigger   ├── utils/
+config/jobs/*.yaml          ← params    │   ├── preflight_check.sh
+src/                        ← app       │   ├── startup_common.sh
+                                         │   ├── run_contract.sh
+                                         │   └── run_contract.py
+                                         └── templates/
+                                             └── (starter files you copy once)
+```
+
+### The 6-step pipeline
+
+Every CloudBuild pipeline follows the same pattern. Steps 2-5 are identical across all repos — they just call `cicd/` scripts:
+
+```
+CloudBuild trigger fires
+        │
+        ▼
+┌──────────────────┐
+│ 0. init-submodules│  git submodule update --init
+└────────┬─────────┘
+         │
+    ┌────▼────┐
+    │         │
+┌───▼──┐  ┌──▼───────────┐
+│ 1.   │  │ 2. build     │
+│valid-│  │ base image   │  Docker layer 1: OS + deps
+│ate   │  │ (if needed)  │  Cached in Artifact Registry
+└───┬──┘  └──────┬───────┘
+    │            │
+    │     ┌──────▼───────┐
+    │     │ 3. build     │
+    │     │ code layer   │  Docker layer 2: your src/
+    │     │              │  Rebuilt every commit
+    │     └──────┬───────┘
+    │            │
+    └─────┬──────┘
+          │
+   ┌──────▼───────┐
+   │ 4. create VM │  Assembles startup script:
+   │              │    preflight_check.sh
+   │              │  + startup_common.sh
+   │              │  + your_pipeline.sh
+   │              │  → sed replaces __PLACEHOLDERS__
+   │              │  → creates GCE VM
+   │              │  → VM runs async, self-deletes
+   └──────┬───────┘
+          │
+   ┌──────▼───────┐
+   │ 5. summary   │  Prints build ID, output paths,
+   │    report    │  Cloud Logging link
+   └──────────────┘
+
+CloudBuild exits. VM processes data independently.
+```
+
+### VM startup script assembly
+
+The most important thing `cicd/` does is assemble the VM startup script. Your project provides the pipeline logic; `cicd/` wraps it with infrastructure:
+
+```
+prepare_vm_startup.sh concatenates:
+┌──────────────────────────────┐
+│ cicd/utils/preflight_check.sh│  GCS validation helpers
+├──────────────────────────────┤
+│ cicd/utils/startup_common.sh │  Docker auth + pull + helpers
+├──────────────────────────────┤
+│ YOUR vm/my_pipeline.sh       │  Your actual pipeline logic
+└──────────────────────────────┘
+              │
+              ▼  sed replaces __PLACEHOLDERS__
+     /tmp/startup-script.sh
+              │
+              ▼  passed to gcloud compute instances create
+          GCE VM boots and runs it
+```
+
+### Config flow
+
+Two independent config trees merge at runtime:
+
+```
+INFRASTRUCTURE CONFIG (cicd)              APPLICATION CONFIG (your project)
+─────────────────────────────             ─────────────────────────────────
+cloudbuild-builds/config/                 config/
+  defaults.yaml                             base.yaml
+    region: europe-west1                    jobs/
+    bucket: my-bucket                         my_job.yaml
+    service_account: ...                        name: my_job
+    vm_zones: ...                               aoi_path: data/aoi/...
+         │                                      variables: [ndvi, ndwi]
+         ▼                                           │
+  load_defaults.sh                                   ▼
+    → CB_REGION, CB_BUCKET, ...              Your application reads these
+    → Used by builder scripts                at runtime inside the Docker
+                                             container on the VM
+```
+
+Infrastructure config tells `cicd/` WHERE to run (region, bucket, machine type). Application config tells YOUR CODE WHAT to process (AOI, dates, variables).
+
+### How another team reuses this
+
+```
+1. git submodule add ... cicd            # Add cicd/ to your repo
+2. cp cicd/templates/* your-project/     # Copy starter files
+3. Edit defaults.yaml                    # Your GCP project, bucket, SA
+4. Write your VM script                  # Your pipeline logic
+5. Write your CloudBuild YAML            # Wire the 6 steps
+6. gcloud builds submit                  # Done
+```
+
+Steps 2-5 of the CloudBuild YAML are copy-paste from the template. The only things that change between projects are:
+- `defaults.yaml` (your GCP project settings)
+- `vm/my_pipeline.sh` (your pipeline logic)
+- CloudBuild YAML substitutions (your pipeline parameters)
+
+---
+
+## Must-copy templates
+
+Templates in [templates/](templates/) to copy into your project:
 
 | File | Copy to | Purpose |
 |------|---------|---------|
@@ -48,17 +213,17 @@ cicd/
 │   └── run_contract_jobs.example.json
 └── docs/
     ├── SETUP.md
-    ├── PIPELINE_GUIDE.md
+    ├── STANDARD_PROJECT_TEMPLATE.md
     └── RUN_CONTRACT_GUIDE.md
 ```
 
-## How it works
+## How defaults work
 
 ```
 Your project                          cicd/ submodule
 ─────────────                         ────────────────
 defaults.yaml ──DEFAULTS_FILE──> load_defaults.sh ──> CB_REGION, CB_BUCKET, ...
-                                                            │
+                                                           │
 CloudBuild YAML ──_REGION──> builder scripts use: ${_REGION:-${CB_REGION}}
                              (CloudBuild substitution wins, then defaults)
 ```
