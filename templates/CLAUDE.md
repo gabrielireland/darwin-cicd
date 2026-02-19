@@ -62,6 +62,8 @@ Suggest additions when:
 
 **Metadata chain of custody**: metadata does NOT get disconnected at any moment. Downstream pipelines MUST read class definitions, feature names, and config from upstream metadata files — NOT from hardcoded values.
 
+**Run Contract vs Application Reporting**: The cicd run contract (`_run_contract.json`) handles infrastructure verification — asset existence, corruption detection, per-folder GCS uploads. Application-level execution tracking (task lifecycle, timing, errors) belongs in the pipeline's own reporting code. These are separate systems with separate files. Application code MUST NOT duplicate verification logic.
+
 ---
 
 ## 2. CLOUDBUILD RULES

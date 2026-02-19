@@ -479,4 +479,9 @@ pathlib.Path(sys.argv[3]).write_text(json.dumps({
 - No manual `gsutil cp` — finalize handles GCS uploads
 - No log uploads to GCS — pipeline logs stay on the VM (Cloud Logging captures them)
 
+**Separation of concerns:**
+- The run contract handles ALL post-run verification (existence, corruption, GCS uploads)
+- Your pipeline code handles execution tracking (what ran, what failed, timing)
+- Do NOT duplicate verification logic inside your pipeline — let `finalize` handle it
+
 See `docs/RUN_CONTRACT_GUIDE.md` for schema and advanced usage (Cloud Run env generation, produced-asset updates, strict gates).

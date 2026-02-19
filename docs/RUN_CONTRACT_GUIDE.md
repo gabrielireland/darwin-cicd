@@ -12,6 +12,23 @@
 
 This follows the same expected-vs-actual reporting logic in a generic form for any pipeline.
 
+## Two-Layer Observability Model
+
+Run contracts operate at the **infrastructure layer** — they verify that expected files exist, detect corruption, and upload per-folder contracts to GCS. They are pipeline-agnostic and work the same for any pipeline.
+
+Application-level reporting (e.g., task execution logs, timing, error details) is the responsibility of the **pipeline's own code**. This is intentionally separate:
+
+| Layer | Responsibility | Tool | Output |
+|-------|---------------|------|--------|
+| **Infrastructure** (cicd) | Asset existence, corruption detection, per-folder contracts | `run_contract.py` | `_run_contract.json` |
+| **Application** (pipeline) | Task lifecycle, execution timing, error context, produced assets | Pipeline-specific | `run_tasks.jsonl`, `run_summary.json`, etc. |
+
+**Rules:**
+- Infrastructure verification (file scanning, corruption detection) belongs ONLY in the run contract
+- Application code should NOT duplicate existence checks or corruption detection
+- The run contract does NOT need to know about pipeline business logic (indicator names, AOI processing, etc.)
+- Both layers write to their own files; they do not merge
+
 ## Critical Rule: Never Pass JSON Through Shell
 
 **All JSON arguments MUST be passed as files, never as inline strings.**
