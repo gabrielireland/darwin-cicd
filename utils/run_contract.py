@@ -1323,6 +1323,135 @@ def _format_env(values: Mapping[str, str], fmt: str) -> str:
     return "\n".join(f"{key}={value}" for key, value in values.items())
 
 
+def _gsutil_stat(uri: str) -> Tuple[bool, int | None]:
+    """Check existence and size of a GCS URI in a single call.
+
+    Returns (exists, size_bytes).
+    """
+    if not _command_exists("gsutil"):
+        return (False, None)
+    proc = subprocess.run(["gsutil", "stat", uri], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return (False, None)
+    size_bytes = None
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("content-length:"):
+            try:
+                size_bytes = int(stripped.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                pass
+    return (True, size_bytes)
+
+
+def _format_size(size_bytes: int | None) -> str:
+    """Human-readable file size."""
+    if size_bytes is None:
+        return "unknown"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f} {unit}" if unit != "B" else f"{size_bytes} B"
+        size_bytes = size_bytes / 1024
+    return f"{size_bytes:.1f} PB"
+
+
+def _download_gcs_contract(uri: str) -> Dict[str, Any] | None:
+    """Download a _run_contract.json from GCS and parse it."""
+    if not _command_exists("gsutil"):
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            ["gsutil", "cp", uri, tmp_path], capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(Path(tmp_path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    gcs_folder = _normalize_gs_uri(str(args.gcs_folder)).rstrip("/")
+    report_file = Path("./verification_report.json").resolve()
+
+    print(f"run_contract verify: scanning {gcs_folder}/ ...")
+    all_files = _scan_gcs_files([gcs_folder])
+    contract_uris = [f for f in all_files if f.endswith("_run_contract.json")]
+
+    if not contract_uris:
+        print(f"No _run_contract.json files found under {gcs_folder}/")
+        return 0
+
+    print(f"Found {len(contract_uris)} contract(s). Verifying assets ...")
+
+    all_assets: List[Dict[str, Any]] = []
+    total_ok = 0
+    total_missing = 0
+    total_size = 0
+
+    for contract_uri in contract_uris:
+        contract = _download_gcs_contract(contract_uri)
+        if contract is None:
+            print(f"  WARN: could not read {contract_uri}", file=sys.stderr)
+            continue
+
+        assets = contract.get("assets", [])
+        gcs_assets = [a for a in assets if a.get("uri", "").startswith("gs://")]
+        for i, asset in enumerate(gcs_assets, 1):
+            normalized = _normalize_gs_uri(str(asset["uri"]))
+            exists, size_bytes = _gsutil_stat(normalized)
+
+            if exists:
+                total_ok += 1
+                if size_bytes is not None:
+                    total_size += size_bytes
+                print(f"  [{i}/{len(gcs_assets)}] OK  {_format_size(size_bytes):>10s}  {normalized}")
+            else:
+                total_missing += 1
+                print(f"  [{i}/{len(gcs_assets)}] MISSING          {normalized}")
+
+            all_assets.append({
+                "asset_id": asset.get("asset_id"),
+                "uri": normalized,
+                "exists": exists,
+                "size_bytes": size_bytes,
+                "size_human": _format_size(size_bytes),
+                "status": "ok" if exists else "missing",
+                "required": asset.get("required", True),
+                "kind": asset.get("kind"),
+                "contract_source": contract_uri,
+            })
+
+    total_assets = total_ok + total_missing
+    report = {
+        "gcs_folder": gcs_folder,
+        "contracts_found": len(contract_uris),
+        "total_assets": total_assets,
+        "total_ok": total_ok,
+        "total_missing": total_missing,
+        "total_size_bytes": total_size,
+        "total_size_human": _format_size(total_size),
+        "all_ok": total_missing == 0,
+        "assets": all_assets,
+    }
+
+    report_file.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    print("")
+    if total_missing == 0:
+        print(f"All {total_assets} assets verified across {len(contract_uris)} contract(s). "
+              f"Total size: {_format_size(total_size)}.")
+    else:
+        print(f"{total_missing} of {total_assets} assets missing across {len(contract_uris)} contract(s).")
+    print(f"Report: {report_file}")
+
+    return 0
+
+
 def _cmd_cloud_run_env(args: argparse.Namespace) -> int:
     job_id = str(args.job_id or os.getenv("RUN_CONTRACT_JOB_ID", "")).strip()
     if not job_id:
@@ -1423,6 +1552,10 @@ def _build_parser() -> argparse.ArgumentParser:
                             help="Upload scope: 'folder' writes per-folder contracts (default), 'run' writes one at output root")
     p_finalize.add_argument("--strict", action="store_true", help="Exit 2 if required outputs are missing/corrupt/unverified")
     p_finalize.set_defaults(func=_cmd_finalize)
+
+    p_verify = sub.add_parser("verify", help="Discover contracts under a GCS folder and verify all asset URIs exist")
+    p_verify.add_argument("gcs_folder", help="gs:// folder to scan recursively for _run_contract.json files")
+    p_verify.set_defaults(func=_cmd_verify)
 
     p_cre = sub.add_parser("cloud-run-env", help="Generate Cloud Run env values for run-contract wiring")
     p_cre.add_argument("--job-id", help="Job identifier")
