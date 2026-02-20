@@ -169,8 +169,11 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
   --run-id "${BUILD_ID:-}" \
   --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
   --output-location "${OUTPUT_GCS}" \
-  --init-json-file "${INIT_JSON}"
+  --init-json-file "${INIT_JSON}" \
+  --upload-gcs-dir "${OUTPUT_GCS}"
 ```
+
+The `--upload-gcs-dir` flag uploads the contract to GCS immediately after init, so there's a record of what was expected even if the VM crashes mid-run.
 
 The `--init-json-file` accepts a single JSON object with these keys:
 
@@ -327,7 +330,8 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
   --run-id "${BUILD_ID:-}" \
   --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
   --output-location "${OUTPUT_GCS}" \
-  --init-json-file "${INIT_JSON}"
+  --init-json-file "${INIT_JSON}" \
+  --upload-gcs-dir "${OUTPUT_GCS}"
 
 # (Optional) Preflight — verify inputs exist
 # "${RUN_CONTRACT_CLI}" preflight --contract-file "${CONTRACT_FILE}" --strict
@@ -384,6 +388,7 @@ pathlib.Path('/tmp/contract_args/expected_inputs.json').write_text(json.dumps([
   --job-id "my-pipeline" \
   --run-id "${BUILD_ID}" \
   --expected-assets-file "/tmp/contract_args/expected_inputs.json" \
+  --upload-gcs-dir "${OUTPUT_GCS}" \
   ...
 
 # Preflight

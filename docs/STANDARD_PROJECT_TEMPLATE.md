@@ -91,7 +91,8 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
   --run-id "${BUILD_ID:-}" \
   --pipeline-title "${PIPELINE_TITLE:-pipeline}" \
   --output-location "${OUTPUT_GCS}" \
-  --init-json-file "${INIT_JSON}"
+  --init-json-file "${INIT_JSON}" \
+  --upload-gcs-dir "${OUTPUT_GCS}"
 
 # ========== STAGE 2: RUN THE PIPELINE ==========
 START_TIME=$(date +%s)
@@ -445,7 +446,8 @@ RUN_CONTRACT_CLI="$(run_contract_cli_path)"
   --run-id "${BUILD_ID}" \
   --pipeline-title "${PIPELINE_TITLE}" \
   --output-location "${OUTPUT_GCS}" \
-  --init-json-file "${INIT_JSON}"
+  --init-json-file "${INIT_JSON}" \
+  --upload-gcs-dir "${OUTPUT_GCS}"
 
 # ========== STAGE 2: RUN THE PIPELINE ==========
 docker run --rm ... | tee "${LOG_FILE}"

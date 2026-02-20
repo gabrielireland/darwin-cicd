@@ -872,6 +872,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     _write_contract(contract)
 
+    if args.upload_gcs_dir:
+        gcs_dest = args.upload_gcs_dir.rstrip("/") + "/_run_contract.json"
+        ok_upload, err = _upload_contract_to_gcs(contract_file, gcs_dest)
+        if ok_upload:
+            print(f"  uploaded: {gcs_dest}")
+        else:
+            print(f"WARNING: GCS upload failed: {err}", file=sys.stderr)
+
     input_count = sum(1 for a in assets if a.get("role") == "input")
     output_count = sum(1 for a in assets if a.get("role") == "output")
 
@@ -1363,6 +1371,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--run-metadata-json-file", help="File containing JSON object merged into run.extra")
     p_init.add_argument("--vars-file", help="JSON object of template variables")
     p_init.add_argument("--var", action="append", help="Template variable KEY=VALUE (repeatable)")
+    p_init.add_argument("--upload-gcs-dir", help="Upload contract to gs:// path after init")
     p_init.set_defaults(func=_cmd_init)
 
     p_pre = sub.add_parser("preflight", help="Verify all input assets exist before processing")
