@@ -347,9 +347,25 @@ filename = f"{variable}_{year}_{season}_{aoi}.tif"
 **Always** do this:
 ```python
 # CORRECT — pipeline declares its own outputs
-expected_assets = pipeline.expected_outputs(ctx)
-# returns: [{"asset_id": "...", "uri": "gs://...b02...tif"}, ...]
+expected_assets = pipeline.get_expected_assets(ctx)
+# returns: [{"asset_id": "...", "kind": "cog", "required": True, "uri": "gs://...b02...tif"}, ...]
 ```
+
+### `get_expected_assets(ctx)` Method Contract
+
+Every pipeline MUST implement `get_expected_assets(ctx)` that returns the full list of expected outputs **before** execution. Each entry is a dict with:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `asset_id` | Yes | Unique ID within the task (e.g., `jaen/ndvi/2019/aug/cog`) |
+| `kind` | Yes | Asset type: `cog`, `metadata`, `manifest`, etc. |
+| `required` | Yes | Whether the asset MUST be present for the run to be valid |
+| `uri` | One of uri/local_path | GCS URI (`gs://...`) |
+| `local_path` | One of uri/local_path | Local filesystem path |
+
+**Static pipelines** (output count known from config): declare all outputs. Example — per-band pipeline declares one COG per band, one metadata per band, one manifest.
+
+**Dynamic pipelines** (output count discovered at runtime): declare only what's known upfront (e.g., the manifest). Individual outputs are registered via `record-produced` during execution.
 
 ### Anti-Patterns
 
