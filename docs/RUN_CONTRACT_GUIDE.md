@@ -308,6 +308,58 @@ gs://bucket/jaen/_run_contract.json         (all assets)
 
 Upload results are stored in `verification.folder_uploads` on the local contract.
 
+## Output Naming: Single Source of Truth (CRITICAL)
+
+The pipeline that **produces** an output is the **only** authority on its filename, path, and count. No other layer (orchestrator, VM script, config template) may independently construct output names.
+
+**Why**: When naming logic is duplicated, the run contract declares expected files that don't match what the pipeline actually writes. Verification then reports false negatives (files marked missing that actually exist under different names), breaking the entire observability chain.
+
+### Rules
+
+| Rule | Details |
+|------|---------|
+| **Pipeline owns naming** | The code that writes a file is the single source of truth for its name, extension, and path structure. This applies to any format: `.tif`, `.zarr`, `.cog`, `.parquet`, `.json`, etc. |
+| **Contract consumes, never invents** | The run contract receives expected asset definitions from the pipeline — it never constructs filenames on its own. |
+| **No parallel naming logic** | If an orchestrator, config layer, or VM script needs to know output names before execution, it must ask the pipeline (via a method, a manifest, or a pre-declared schema) — not re-derive them independently. |
+| **Multi-output awareness** | Pipelines that produce multiple files per task (e.g., per-band, per-tile, per-chunk) must declare all individual outputs as separate expected assets. A single glob is acceptable for verification, but expected assets must reflect the actual file count and naming. |
+
+### Pattern: Pipeline Declares Expected Assets
+
+The pipeline (or its indicator/processor) exposes a function that returns the list of expected output assets **before** execution starts. The orchestrator calls this function and passes the result to `run_contract.py init`.
+
+```
+┌────────────┐    "what will you produce?"    ┌──────────┐
+│ Orchestrator│ ──────────────────────────────>│ Pipeline  │
+│             │ <──────────────────────────────│           │
+│             │    [asset_id, uri, kind, ...]  │           │
+│             │                                │           │
+│  passes to  │                                │  writes   │
+│  run_contract init                           │  files    │
+└────────────┘                                 └──────────┘
+```
+
+**Never** do this:
+```python
+# WRONG — orchestrator guesses the filename
+filename = f"{variable}_{year}_{season}_{aoi}.tif"
+```
+
+**Always** do this:
+```python
+# CORRECT — pipeline declares its own outputs
+expected_assets = pipeline.expected_outputs(ctx)
+# returns: [{"asset_id": "...", "uri": "gs://...b02...tif"}, ...]
+```
+
+### Anti-Patterns
+
+| Anti-Pattern | Consequence |
+|---|---|
+| Orchestrator constructs filenames using its own template | Names diverge when pipeline changes naming (e.g., adds band prefix) |
+| Config YAML contains hardcoded output paths | Config and pipeline drift apart silently |
+| VM startup script builds expected asset URIs from substitution variables | Third place where naming logic lives, triple the drift risk |
+| Single expected asset declared for a pipeline that produces N files | Verification cannot track individual outputs |
+
 ## Pipeline Lifecycle (Standard for All Pipelines)
 
 Every VM startup script MUST follow this 3-stage pattern:
