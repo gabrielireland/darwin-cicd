@@ -367,6 +367,69 @@ Every pipeline MUST implement `get_expected_assets(ctx)` that returns the full l
 
 **Dynamic pipelines** (output count discovered at runtime): declare only what's known upfront (e.g., the manifest). Individual outputs are registered via `record-produced` during execution.
 
+### End-to-End Example: Contract as the Dictionary (CRITICAL)
+
+The run contract is the **dictionary** — once initialized, every layer reads paths FROM it. No layer ever constructs paths on the fly.
+
+**Step A — Pipeline lists all files it will produce:**
+
+```python
+# The pipeline knows its own naming. Ask it BEFORE execution.
+assets = pipeline.get_expected_assets(ctx)
+# Returns:
+# [
+#   {"asset_id": "jaen/ndvi/2019/aug/cog",      "kind": "cog",      "required": True,  "uri": "gs://bucket/ndvi/ndvi_2019_aug_jaen.tif"},
+#   {"asset_id": "jaen/ndvi/2019/aug/metadata",  "kind": "metadata", "required": False, "uri": "gs://bucket/ndvi/ndvi_2019_aug_jaen.json"},
+#   {"asset_id": "jaen/ndvi/2019/aug/manifest",  "kind": "manifest", "required": False, "uri": "gs://bucket/ndvi/manifest_ndvi_2019_aug_jaen.jsonl"},
+# ]
+```
+
+**Step B — Initialize the run contract with those assets:**
+
+```python
+# Write the contract init file — this IS the dictionary
+import json, pathlib
+pathlib.Path("/tmp/contract_init.json").write_text(json.dumps({
+    "expected_assets": assets,   # <-- straight from the pipeline
+    "config": { ... },
+    "run_metadata": { ... },
+}))
+```
+
+```bash
+"${RUN_CONTRACT_CLI}" init \
+  --contract-file "${CONTRACT_FILE}" \
+  --job-id "ndvi" \
+  --run-id "${BUILD_ID}" \
+  --init-json-file "/tmp/contract_init.json" \
+  --upload-gcs-dir "${OUTPUT_GCS}"
+```
+
+**Step C — During execution, read paths FROM the contract, never build them:**
+
+```python
+# WRONG — building a path on the fly
+output_path = f"gs://{bucket}/{prefix}/ndvi_2019_aug_jaen.tif"
+
+# CORRECT — the contract already knows every path
+contract = json.loads(Path(contract_file).read_text())
+for asset in contract["assets"]:
+    if asset["kind"] == "cog":
+        output_path = asset["uri"]  # <-- read from the dictionary
+```
+
+**Step D — Finalize verifies the dictionary against reality:**
+
+```bash
+"${RUN_CONTRACT_CLI}" finalize \
+  --contract-file "${CONTRACT_FILE}" \
+  --status "${STATUS}" \
+  --contract-scope folder
+# Reports: required_missing=0 required_corrupt=0
+```
+
+**The rule is simple**: paths are born in `get_expected_assets()`, written to the contract, and read from the contract. They are never invented anywhere else.
+
 ### Anti-Patterns
 
 | Anti-Pattern | Consequence |
