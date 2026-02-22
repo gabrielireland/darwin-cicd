@@ -1452,6 +1452,80 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_extract_retry_scope(args: argparse.Namespace) -> int:
+    """Read a prior contract, verify assets on GCS, output retry scope JSON."""
+    output_file = Path(args.output_file)
+
+    # ---- Load contract ----
+    contract: Dict[str, Any] | None = None
+    source_label = ""
+    if args.gcs_contract:
+        source_label = _normalize_gs_uri(str(args.gcs_contract))
+        print(f"run_contract extract-retry-scope: downloading {source_label}")
+        contract = _download_gcs_contract(source_label)
+        if contract is None:
+            raise ValueError(f"Could not download contract from {source_label}")
+    elif args.contract_file:
+        source_label = str(Path(args.contract_file).resolve())
+        print(f"run_contract extract-retry-scope: reading {source_label}")
+        contract = json.loads(Path(args.contract_file).read_text(encoding="utf-8"))
+    else:
+        raise ValueError("Either --contract-file or --gcs-contract is required")
+
+    assets = contract.get("assets", [])
+    required_output_assets = [
+        a for a in assets
+        if a.get("role") == "output"
+        and a.get("required", False)
+        and a.get("uri", "").startswith("gs://")
+    ]
+
+    print(f"  total assets: {len(assets)}, required output assets to verify: {len(required_output_assets)}")
+
+    # ---- Verify each required output asset on GCS ----
+    missing_by_task: Dict[str, List[str]] = {}
+    ok_by_task: Dict[str, List[str]] = {}
+    all_task_ids: set[str] = set()
+
+    for i, asset in enumerate(required_output_assets, 1):
+        asset_id = asset.get("asset_id", "")
+        uri = _normalize_gs_uri(str(asset["uri"]))
+
+        # Extract task_id: first 4 segments of asset_id
+        parts = asset_id.split("/")
+        task_id = "/".join(parts[:4]) if len(parts) >= 4 else asset_id
+        all_task_ids.add(task_id)
+
+        exists, _ = _gsutil_stat(uri)
+        if exists:
+            ok_by_task.setdefault(task_id, []).append(asset_id)
+            print(f"  [{i}/{len(required_output_assets)}] OK      {uri}")
+        else:
+            missing_by_task.setdefault(task_id, []).append(asset_id)
+            print(f"  [{i}/{len(required_output_assets)}] MISSING {uri}")
+
+    # ---- Determine retry scope ----
+    retry_task_ids = sorted(missing_by_task.keys())
+    completed_task_ids = sorted(all_task_ids - set(retry_task_ids))
+
+    scope = {
+        "source_contract": source_label,
+        "verified_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "total_tasks": len(all_task_ids),
+        "completed_tasks": len(completed_task_ids),
+        "retry_tasks": len(retry_task_ids),
+        "retry_task_ids": retry_task_ids,
+    }
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(scope, indent=2) + "\n", encoding="utf-8")
+
+    print(f"\n  total_tasks={len(all_task_ids)} completed={len(completed_task_ids)} retry={len(retry_task_ids)}")
+    print(f"  Retry scope written to {output_file}")
+
+    return 0
+
+
 def _cmd_cloud_run_env(args: argparse.Namespace) -> int:
     job_id = str(args.job_id or os.getenv("RUN_CONTRACT_JOB_ID", "")).strip()
     if not job_id:
@@ -1556,6 +1630,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="Discover contracts under a GCS folder and verify all asset URIs exist")
     p_verify.add_argument("gcs_folder", help="gs:// folder to scan recursively for _run_contract.json files")
     p_verify.set_defaults(func=_cmd_verify)
+
+    p_retry = sub.add_parser("extract-retry-scope",
+                              help="Read a prior contract, verify assets on GCS, and output a retry scope JSON")
+    p_retry.add_argument("--contract-file", help="Path to a local _run_contract.json")
+    p_retry.add_argument("--gcs-contract", help="gs:// URI of a _run_contract.json to download")
+    p_retry.add_argument("--output-file", required=True, help="Path to write the retry scope JSON")
+    p_retry.set_defaults(func=_cmd_extract_retry_scope)
 
     p_cre = sub.add_parser("cloud-run-env", help="Generate Cloud Run env values for run-contract wiring")
     p_cre.add_argument("--job-id", help="Job identifier")

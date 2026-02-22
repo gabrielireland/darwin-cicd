@@ -527,3 +527,128 @@ pathlib.Path('/tmp/contract_args/expected_inputs.json').write_text(json.dumps([
 ```
 
 The contract approach gives you structured tracking, per-asset status in the contract JSON, and a unified audit trail for both inputs and outputs.
+
+## Contract-Driven Resume
+
+The VM startup script **auto-detects** a prior run contract at the GCS output folder. If found, it extracts the retry scope and only processes incomplete tasks. No extra CloudBuild substitutions or manual parameters needed.
+
+### How It Works
+
+```
+gs://{OUTPUT_PREFIX}/_run_contract.json exists?
+  → YES: download → extract-retry-scope → run only missing tasks
+  → NO:  fresh run (plan all assets, init contract, run everything)
+```
+
+1. VM checks `gs://{BUCKET}/{OUTPUT_PREFIX}/_run_contract.json`
+2. If found → `extract-retry-scope` verifies each required output asset on GCS
+3. Tasks with ANY missing required COGs are added to the retry scope
+4. Pipeline plan + execution are filtered to only retry tasks
+5. Finalize uploads updated per-folder contracts (replacing prior ones)
+
+If no contract exists → fresh run. Current behavior is completely unchanged.
+
+### `extract-retry-scope` Subcommand
+
+```bash
+run_contract.py extract-retry-scope \
+  --contract-file /tmp/prior_contract.json \
+  --output-file /tmp/retry_scope.json
+```
+
+Or download directly from GCS:
+
+```bash
+run_contract.py extract-retry-scope \
+  --gcs-contract gs://bucket/prefix/_run_contract.json \
+  --output-file /tmp/retry_scope.json
+```
+
+Output:
+
+```json
+{
+  "source_contract": "/tmp/prior_contract.json",
+  "verified_at": "2026-02-21T12:00:00+00:00",
+  "total_tasks": 96,
+  "completed_tasks": 69,
+  "retry_tasks": 27,
+  "retry_task_ids": [
+    "jaen/s2_raw_composite/2024/oct",
+    "jaen/s2_raw_composite/2024/nov",
+    "jaen/s2_raw_composite/2025/jan"
+  ]
+}
+```
+
+The task IDs match the orchestrator's `{aoi}/{variable}/{year}/{season}` format — derived from the first 4 segments of each `asset_id`.
+
+### Pipeline CLI Integration
+
+The retry scope is passed to the pipeline via `--retry-scope-file`:
+
+```bash
+# Plan only retry tasks
+run_pipeline.py job.yaml --plan-expected-assets /tmp/assets.json \
+  --retry-scope-file /tmp/retry_scope.json
+
+# Execute only retry tasks
+run_pipeline.py job.yaml --retry-scope-file /tmp/retry_scope.json
+```
+
+### Safety Layers
+
+Resume has three levels of protection against re-processing completed work:
+
+| Layer | What it catches | When it runs |
+|-------|----------------|--------------|
+| **Contract-level skip** (retry scope) | Entire tasks known-complete from prior contract | Before pipeline starts |
+| **File-level skip** (`write_mode: update`) | Individual bands that exist in GCS | Inside each task's `run()` |
+| **Finalize verification** | Any remaining gaps after execution | After pipeline completes |
+
+### VM Startup Script Pattern
+
+```bash
+# ========== STAGE 0a: CHECK FOR PRIOR CONTRACT ==========
+RETRY_SCOPE_FILE=""
+PRIOR_CONTRACT="/tmp/prior_run_contract.json"
+
+if gsutil -q stat "${OUTPUT_GCS}/_run_contract.json" 2>/dev/null; then
+  gsutil cp "${OUTPUT_GCS}/_run_contract.json" "${PRIOR_CONTRACT}"
+  RETRY_SCOPE_FILE="/tmp/retry_scope.json"
+
+  if "${RUN_CONTRACT_CLI}" extract-retry-scope \
+    --contract-file "${PRIOR_CONTRACT}" \
+    --output-file "${RETRY_SCOPE_FILE}"; then
+
+    RETRY_COUNT=$(python3 -c "import json; print(json.load(open('${RETRY_SCOPE_FILE}'))['retry_tasks'])")
+    if [ "${RETRY_COUNT}" -eq 0 ]; then
+      echo "All tasks already complete."
+      exit 0
+    fi
+  else
+    RETRY_SCOPE_FILE=""   # fallback to full run
+  fi
+fi
+
+# ========== STAGE 0b: PLAN (filtered if resuming) ==========
+PLAN_EXTRA_ARGS=""
+if [ -n "${RETRY_SCOPE_FILE}" ]; then
+  cp "${RETRY_SCOPE_FILE}" "${WORK_DIR}/retry_scope.json"
+  PLAN_EXTRA_ARGS="--retry-scope-file /workspace/retry_scope.json"
+fi
+
+docker run --rm ... \
+  --plan-expected-assets /workspace/expected_assets.json \
+  ${PLAN_EXTRA_ARGS}
+
+# ========== STAGE 2: RUN (filtered if resuming) ==========
+RETRY_DOCKER_ARGS=""
+if [ -n "${RETRY_SCOPE_FILE}" ]; then
+  RETRY_DOCKER_ARGS="--retry-scope-file /workspace/retry_scope.json"
+fi
+
+docker run --rm ... \
+  /app/scripts/run_pipeline.py "/app/${JOB_CONFIG}" \
+  ${RETRY_DOCKER_ARGS}
+```
