@@ -22,6 +22,10 @@
 # Expects these placeholders to be sed-replaced before execution:
 #   __VM_NAME__, __VM_ZONE__, __CLOUDBUILD_YAML__, __BUILD_ID__,
 #   __GIT_COMMIT__, __REGION__, __IMAGE_URI__, __PIPELINE_TITLE__
+#
+# Optional (via vm_config_{idx}.env):
+#   __VM_ON_FAILURE__  — shutdown (default) | keep-alive
+#   __VM_DEBUG_TTL__   — Hours to keep VM alive on failure (default: 4)
 # ========================================
 
 # Global timestamp set when script starts
@@ -62,18 +66,67 @@ vm_export_metadata() {
 # ========================================
 # vm_setup_cleanup_trap
 # ========================================
-# Setup trap to shutdown VM on exit (success or failure)
+# Setup trap to shutdown VM on exit.
+# Behavior on failure is controlled by VM_ON_FAILURE:
+#   shutdown   (default) — VM shuts down immediately
+#   keep-alive           — VM stays running for VM_DEBUG_TTL hours
 # Usage: vm_setup_cleanup_trap
 vm_setup_cleanup_trap() {
   _vm_cleanup() {
+    local exit_code=$?
     local VM_END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "=========================================="
-    echo "Cleanup: Shutting down VM"
+
     echo "=========================================="
     echo "Start Time: ${VM_START_TIME}"
     echo "End Time  : ${VM_END_TIME}"
     echo "=========================================="
-    sudo shutdown -h now
+
+    # Success — always shutdown
+    if [ "$exit_code" -eq 0 ]; then
+      echo "Pipeline completed successfully — shutting down VM"
+      sudo shutdown -h now
+      return
+    fi
+
+    # Failure path
+    local on_failure="${VM_ON_FAILURE:-shutdown}"
+    local debug_ttl="${VM_DEBUG_TTL:-4}"
+
+    echo "==========================================="
+    echo "  PIPELINE FAILED (exit code: $exit_code)"
+    echo "==========================================="
+
+    if [ "$on_failure" = "keep-alive" ]; then
+      echo ""
+      echo "  VM_ON_FAILURE=keep-alive — VM will stay running for ${debug_ttl}h"
+      echo ""
+      echo "  SSH into this VM:"
+      echo "    gcloud compute ssh ${VM_NAME:-unknown} --zone=${VM_ZONE:-unknown} --tunnel-through-iap"
+      echo ""
+      echo "  Useful debug commands:"
+      echo "    docker ps -a                    # Check container status"
+      echo "    docker logs \$(docker ps -aq -n1) # Last container logs"
+      echo "    ls -la /tmp/                    # Check output files"
+      echo "    df -h                           # Check disk space"
+      echo ""
+      echo "  Auto-shutdown in ${debug_ttl} hours."
+      echo "  Manual shutdown: sudo shutdown -h now"
+      echo "==========================================="
+
+      # Kill the idle watchdog so it doesn't shut down the VM
+      if [ -n "${WATCHDOG_PID:-}" ]; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+      fi
+
+      # Schedule delayed shutdown
+      sudo shutdown -h +"$((debug_ttl * 60))" "VM debug TTL expired (${debug_ttl}h)" &
+
+      # Keep the script alive so the trap doesn't re-fire
+      sleep infinity
+    else
+      echo "  VM_ON_FAILURE=shutdown — shutting down now"
+      sudo shutdown -h now
+    fi
   }
   trap _vm_cleanup EXIT
 }
@@ -449,6 +502,7 @@ vm_start_idle_watchdog() {
   ) &
 
   WATCHDOG_PID=$!
+  export WATCHDOG_PID
   echo "Idle watchdog started (PID: ${WATCHDOG_PID})"
 }
 
@@ -467,6 +521,12 @@ vm_standard_init() {
       --idle-timeout=*) IDLE_TIMEOUT="${arg#*=}" ;;
     esac
   done
+
+  # Resolve VM debug mode placeholders (fall back to defaults if not set via vm_config)
+  export VM_ON_FAILURE="${VM_ON_FAILURE:-__VM_ON_FAILURE__}"
+  export VM_DEBUG_TTL="${VM_DEBUG_TTL:-__VM_DEBUG_TTL__}"
+  [[ "$VM_ON_FAILURE" == "__VM_ON_FAILURE__" ]] && VM_ON_FAILURE="shutdown"
+  [[ "$VM_DEBUG_TTL" == "__VM_DEBUG_TTL__" ]] && VM_DEBUG_TTL="4"
 
   vm_startup_banner
   vm_export_metadata
