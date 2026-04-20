@@ -210,6 +210,13 @@ for IDX in $(seq 1 "$VM_COUNT"); do
       CREATE_CMD+=("--provisioning-model=SPOT" "--instance-termination-action=DELETE")
     fi
 
+    if [[ -n "${RESERVATION_NAME:-}" ]]; then
+      CREATE_CMD+=(
+        --reservation="$RESERVATION_NAME"
+        --reservation-affinity=specific
+      )
+    fi
+
     if "${CREATE_CMD[@]}" 2>&1; then
       VM_CREATED=true
       ACTUAL_ZONE="$ZONE"
