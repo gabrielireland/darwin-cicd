@@ -72,7 +72,7 @@ if [[ ${#ZONES[@]} -eq 0 ]]; then
 fi
 
 # VM image settings
-GPU_IMAGE_FAMILY="${GPU_IMAGE_FAMILY:-pytorch-2-7-cu128-ubuntu-2204-nvidia-570}"
+GPU_IMAGE_FAMILY="${GPU_IMAGE_FAMILY:-pytorch-2-9-cu129-ubuntu-2204-nvidia-580}"
 GPU_IMAGE_PROJECT="${GPU_IMAGE_PROJECT:-deeplearning-platform-release}"
 BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-standard}"
 INSTANCE_METADATA="${INSTANCE_METADATA:-google-logging-enabled=true,google-monitoring-enabled=true,install-nvidia-driver=True,startup-script-running=TRUE}"
