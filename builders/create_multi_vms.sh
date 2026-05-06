@@ -71,6 +71,21 @@ if [[ ${#ZONES[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Enforce EU-only zones
+for _Z in "${ZONES[@]}"; do
+  _Z_TRIMMED="$(echo "$_Z" | xargs)"
+  if [[ -n "$_Z_TRIMMED" && ! "$_Z_TRIMMED" =~ ^europe- ]]; then
+    echo "ERROR: Non-EU zone rejected: $_Z_TRIMMED (only europe-* zones allowed)" >&2
+    exit 1
+  fi
+done
+
+# Enforce EU-only region
+if [[ -n "${_REGION:-}" && ! "$_REGION" =~ ^europe- ]]; then
+  echo "ERROR: Non-EU region rejected: $_REGION (only europe-* regions allowed)" >&2
+  exit 1
+fi
+
 # VM image settings
 GPU_IMAGE_FAMILY="${GPU_IMAGE_FAMILY:-pytorch-2-9-cu129-ubuntu-2204-nvidia-580}"
 GPU_IMAGE_PROJECT="${GPU_IMAGE_PROJECT:-deeplearning-platform-release}"
