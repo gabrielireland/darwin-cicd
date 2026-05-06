@@ -463,7 +463,7 @@ vm_final_summary() {
 # ========================================
 # Start background watchdog that shuts down VM after inactivity
 # Usage: vm_start_idle_watchdog [minutes]
-# Default: 90 minutes (1.5 hours) of no Docker containers running
+# Default: 90 minutes (1.5 hours) with no Docker containers AND no gsutil/gcloud-storage transfers
 vm_start_idle_watchdog() {
   local IDLE_TIMEOUT_MINUTES="${1:-90}"
 
@@ -479,9 +479,12 @@ vm_start_idle_watchdog() {
       # Count running Docker containers (excluding paused)
       RUNNING_CONTAINERS=$(docker ps -q 2>/dev/null | wc -l)
 
-      if [ "$RUNNING_CONTAINERS" -eq 0 ]; then
+      # Count active GCS transfers (gsutil / gcloud storage) — pre-container data staging
+      RUNNING_TRANSFERS=$(pgrep -f 'gsutil|gcloud storage' 2>/dev/null | wc -l)
+
+      if [ "$RUNNING_CONTAINERS" -eq 0 ] && [ "$RUNNING_TRANSFERS" -eq 0 ]; then
         IDLE_COUNT=$((IDLE_COUNT + 1))
-        echo "[Idle Watchdog] No containers running. Idle: ${IDLE_COUNT}/${IDLE_TIMEOUT_MINUTES} min"
+        echo "[Idle Watchdog] No containers or GCS transfers running. Idle: ${IDLE_COUNT}/${IDLE_TIMEOUT_MINUTES} min"
 
         if [ "$IDLE_COUNT" -ge "$IDLE_TIMEOUT_MINUTES" ]; then
           echo "[Idle Watchdog] VM idle for ${IDLE_TIMEOUT_MINUTES} minutes. Initiating shutdown..."
@@ -492,9 +495,9 @@ vm_start_idle_watchdog() {
           exit 0
         fi
       else
-        # Reset counter if containers are running
+        # Reset counter if containers or GCS transfers are running
         if [ "$IDLE_COUNT" -gt 0 ]; then
-          echo "[Idle Watchdog] Activity detected. Resetting idle counter."
+          echo "[Idle Watchdog] Activity detected (containers=${RUNNING_CONTAINERS}, transfers=${RUNNING_TRANSFERS}). Resetting idle counter."
         fi
         IDLE_COUNT=0
       fi
